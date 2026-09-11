@@ -1,0 +1,15 @@
+build/
+obj/
+bin/
+.vs/
+work/
+settings.json
+status.json
+guardian.log
+*.exe
+*.pdb
+*.user
+*.bak
+auth.json
+config.toml
+.env
