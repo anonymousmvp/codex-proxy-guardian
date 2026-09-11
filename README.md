@@ -1,6 +1,6 @@
 # Codex Proxy Guardian
 
-让 Windows 上的 Codex 模型连接自动使用 Windows 系统代理。登录 Windows 后，独立 EXE 在后台常驻；Codex 仍从原来的图标启动，无需专用启动脚本。
+让 Windows 上的 Codex 模型连接及“控制此电脑”的远程控制连接自动使用 Windows 系统代理。登录 Windows 后，独立 EXE 在后台常驻；Codex 仍从原来的图标启动，无需专用启动脚本。
 
 ```text
 Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.0.1:7897）→ chatgpt.com
@@ -13,11 +13,12 @@ Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.
 - Windows 10/11，.NET Framework 4.8，Windows PowerShell 5.1。
 - 显式 HTTP/HTTPS 系统代理，通过 HTTP CONNECT 隧道连接服务器；TLS 证书校验保持开启。
 - Codex 模型请求、HTTP 流式响应和 WebSocket。
+- 远程控制的注册、令牌刷新、配对、设备接口与 WebSocket。
 - 使用同一份用户配置的 Codex 桌面应用和 Codex CLI。
 - 用户登录后自启动；进程异常退出后，计划任务每分钟尝试重新启动，最多 999 次。
 - 不更改全局代理环境变量，不注入其他进程，不安装证书或网络驱动。
 
-仅转发 `chatgpt.com/backend-api/codex` 下的模型接口。浏览器、更新下载、MCP 工具和远程控制等其他连接不在此范围。该项目不是通用代理工具，也不是 OpenAI 官方组件。
+仅转发到 `chatgpt.com/backend-api` 下的接口。模型连接使用 `openai_base_url`，远程控制和相关账户接口使用 `chatgpt_base_url`；仅设置前者无法代理远程控制。浏览器、更新下载、SSH、独立 MCP 服务器等其他连接不在此范围。该项目不是通用代理工具，也不是 OpenAI 官方组件。
 
 ## 构建和检查
 
@@ -40,11 +41,11 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 ```
 
-安装工具会构建 EXE，保存到 `%LOCALAPPDATA%\OpenAI\CodexProxyGuardian`，创建 `CodexProxyGuardian` 登录计划任务，并在 Codex 用户配置中设置 `openai_base_url`。默认配置文件为 `%USERPROFILE%\.codex\config.toml`；若设置了 `CODEX_HOME`，则使用对应目录。
+安装工具会构建 EXE，保存到 `%LOCALAPPDATA%\OpenAI\CodexProxyGuardian`，创建 `CodexProxyGuardian` 登录计划任务，并在 Codex 用户配置中设置 `openai_base_url` 和 `chatgpt_base_url`。默认配置文件为 `%USERPROFILE%\.codex\config.toml`；若设置了 `CODEX_HOME`，则使用对应目录。
 
 安装后完整退出并重新打开 Codex 一次。之后使用原来的桌面、开始菜单或任务栏图标。安装脚本仅在安装或升级时运行，日常后台运行不依赖 PowerShell。
 
-默认端口为 `43871`；首次安装可通过 `-Port` 指定其他端口。已有安装会保留自己的随机路由值，禁止无意覆盖用户已有的其他 `openai_base_url`。安装前会在安装目录的 `backups` 中备份配置。
+默认端口为 `43871`；首次安装可通过 `-Port` 指定其他端口。已有安装会保留自己的随机路由值，禁止无意覆盖用户已有的其他 `openai_base_url` 或 `chatgpt_base_url`。安装前会在安装目录的 `backups` 中备份配置。第一次从仅模型代理版本升级后，远程控制可能需要重新添加设备，因为 Codex 按连接地址保存配对状态。
 
 升级本程序时重新运行安装工具，会短暂重启守护程序并中断现有模型连接，应在 Codex 空闲时进行。整理或拉取这个 Git 仓库本身不会更新正在运行的程序。
 
@@ -58,7 +59,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 - 自启动发生在当前用户登录 Windows 后，不是在登录前运行的系统服务。
 - 程序不位于 Codex 更新目录中。正常更新不会覆盖它，但未来 Codex 若修改接口或配置语义，需要重新验证。
 
-状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
+状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数；模型握手成功不代表远程控制已连接。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
 
 ## 停用
 
@@ -68,7 +69,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\uninstall.ps1
 ```
 
-卸载工具只移除该程序拥有的 `openai_base_url`，保留其他 Codex 配置，结束后台进程并删除登录计划任务。安装文件和备份保留，便于检查或恢复。重新打开 Codex 后回到原来的连接方式。
+卸载工具只移除该程序拥有的 `openai_base_url` 和 `chatgpt_base_url`，保留其他 Codex 配置，结束后台进程并删除登录计划任务。安装文件和备份保留，便于检查或恢复。重新打开 Codex 后回到原来的连接方式。
 
 ## 已完成的连接验证
 

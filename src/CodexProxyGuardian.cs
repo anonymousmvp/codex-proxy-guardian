@@ -24,7 +24,7 @@ public static class CodexProxyGuardian {
     static readonly object LogLock = new object();
     static readonly SemaphoreSlim Slots = new SemaphoreSlim(64);
     static GuardianSettings Settings;
-    static long Requests, Upgrades, Failures;
+    static long Requests, Upgrades, Failures, RemoteRequests, RemoteUpgrades;
     const string Destination = "chatgpt.com";
 
     [STAThread]
@@ -138,6 +138,12 @@ public static class CodexProxyGuardian {
         await stream.WriteAsync(body, 0, body.Length);
     }
 
+    static string GetUpstreamPath(string target, string route) {
+        string prefix = "/" + route + "/backend-api";
+        if (!(target.StartsWith(prefix + "/", StringComparison.Ordinal) || target == prefix)) return null;
+        return target.Substring(route.Length + 1);
+    }
+
     static async Task Handle(TcpClient incoming) {
         bool responseStarted = false;
         TcpClient remote = null;
@@ -151,10 +157,11 @@ public static class CodexProxyGuardian {
                 await Reply(local, 400, "HTTP/1.1 required"); return;
             }
             // This listener is not a forward proxy and never accepts arbitrary destinations.
-            string prefix = "/" + Settings.Route + "/backend-api/codex";
-            if (!(first[1].StartsWith(prefix + "/", StringComparison.Ordinal) || first[1] == prefix)) {
+            string path = GetUpstreamPath(first[1], Settings.Route);
+            if (path == null) {
                 await Reply(local, 404, "Not found"); return;
             }
+            bool remoteControl = path.StartsWith("/backend-api/wham/remote/control/", StringComparison.Ordinal);
             var headers = new List<KeyValuePair<string,string>>();
             bool upgrade = false;
             foreach (string line in lines.Skip(1)) {
@@ -170,6 +177,7 @@ public static class CodexProxyGuardian {
                 headers.Add(new KeyValuePair<string,string>(name,value));
             }
             Interlocked.Increment(ref Requests);
+            if (remoteControl) Interlocked.Increment(ref RemoteRequests);
             Uri proxy = ReadSystemProxy();
             remote = new TcpClient();
             remote.NoDelay = true;
@@ -185,7 +193,6 @@ public static class CodexProxyGuardian {
             var tls = secure.AuthenticateAsClientAsync(Destination, null, SslProtocols.Tls12, true);
             if (await Task.WhenAny(tls, Task.Delay(20000)) != tls) throw new TimeoutException("TLS timeout");
             await tls;
-            string path = first[1].Substring(Settings.Route.Length + 1);
             var outgoing = new StringBuilder(first[0] + " " + path + " HTTP/1.1\r\nHost: " + Destination + "\r\n");
             foreach (var header in headers) {
                 string name = header.Key;
@@ -199,13 +206,16 @@ public static class CodexProxyGuardian {
             outgoing.Append("\r\n");
             await Send(secure, outgoing.ToString());
             if (request.Remainder.Length > 0) await secure.WriteAsync(request.Remainder, 0, request.Remainder.Length);
-            Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade);
+            Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade + " remoteControl=" + remoteControl);
             // Stream response headers explicitly so successful WebSocket upgrades are verifiable.
             Task upload = local.CopyToAsync(secure);
             Header response = await ReadHeader(secure);
             string status = response.Text.Split('\r')[0];
-            if (status.StartsWith("HTTP/1.1 101 ")) Interlocked.Increment(ref Upgrades);
-            Log("response", status);
+            if (status.StartsWith("HTTP/1.1 101 ")) {
+                Interlocked.Increment(ref Upgrades);
+                if (remoteControl) Interlocked.Increment(ref RemoteUpgrades);
+            }
+            Log("response", status + " remoteControl=" + remoteControl);
             await Send(local, response.Text);
             responseStarted = true;
             if (response.Remainder.Length > 0) await local.WriteAsync(response.Remainder, 0, response.Remainder.Length);
@@ -232,6 +242,7 @@ public static class CodexProxyGuardian {
                 File.WriteAllText(Path.Combine(Root, "status.json"), new JavaScriptSerializer().Serialize(new {
                     updatedUtc = DateTime.UtcNow.ToString("o"), requests = Interlocked.Read(ref Requests),
                     websocketUpgrades = Interlocked.Read(ref Upgrades), failures = Interlocked.Read(ref Failures),
+                    remoteControlRequests = Interlocked.Read(ref RemoteRequests), remoteControlUpgrades = Interlocked.Read(ref RemoteUpgrades),
                     lastEvent = kind
                 }));
             } catch { }

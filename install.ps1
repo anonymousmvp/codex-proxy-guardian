@@ -25,7 +25,7 @@ if (Test-Path -LiteralPath $configPath) {
 }
 $previousTask = Get-ScheduledTask -TaskName 'CodexProxyGuardian' -ErrorAction SilentlyContinue
 if ($previousTask) { Stop-ScheduledTask -TaskName 'CodexProxyGuardian' }
-Get-Process CodexProxyGuardian -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $executable } | Stop-Process
+Get-Process CodexProxyGuardian -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $executable } | ForEach-Object { $_.Kill(); $_.WaitForExit() }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'build\CodexProxyGuardian.exe') -Destination $executable -Force
 $settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -33,7 +33,7 @@ $action = New-ScheduledTaskAction -Execute $executable -WorkingDirectory $instal
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $options = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName 'CodexProxyGuardian' -Action $action -Trigger $trigger -Principal $principal -Settings $options -Description 'Codex model requests through the current Windows system proxy.' -Force | Out-Null
+Register-ScheduledTask -TaskName 'CodexProxyGuardian' -Action $action -Trigger $trigger -Principal $principal -Settings $options -Description 'Codex model and remote-control requests through the current Windows system proxy.' -Force | Out-Null
 Start-ScheduledTask -TaskName 'CodexProxyGuardian'
 $ready = $false
 for ($i=0; $i -lt 30; $i++) {
