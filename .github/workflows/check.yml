@@ -1,0 +1,17 @@
+name: Build and check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: powershell
+        run: ./build.ps1
+      - name: Check configuration and local listener
+        shell: powershell
+        run: ./tests/check.ps1
