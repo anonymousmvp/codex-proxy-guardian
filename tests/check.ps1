@@ -76,4 +76,19 @@ try {
 } finally {
     if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
 }
+$packageDirectory = Join-Path $project ('build\package-check-' + [Guid]::NewGuid().ToString('N'))
+$setup = Start-Process -FilePath (Join-Path $project 'build\CodexProxyGuardian-Setup.exe') -ArgumentList @('--verify-package',('"'+$packageDirectory+'"')) -WindowStyle Hidden -Wait -PassThru
+Assert-True ($setup.ExitCode -eq 0) 'Installer package extraction failed.'
+$payload = @{
+    'Guardian.exe' = 'build\CodexProxyGuardian.exe'
+    'install.ps1' = 'install.ps1'
+    'uninstall.ps1' = 'uninstall.ps1'
+    'scripts\Config.psm1' = 'scripts\Config.psm1'
+}
+foreach($file in $payload.Keys) {
+    $actual = Get-FileHash -LiteralPath (Join-Path $packageDirectory $file) -Algorithm SHA256
+    $expected = Get-FileHash -LiteralPath (Join-Path $project $payload[$file]) -Algorithm SHA256
+    Assert-True ($actual.Hash -eq $expected.Hash) "Embedded payload differs from source: $file"
+}
+Write-Output 'Single-file installer package check passed: embedded EXE and installation components match.'
 Write-Output 'All checks passed. Test artifacts remain under build/ (gitignored).'

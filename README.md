@@ -2,6 +2,16 @@
 
 让 Windows 上的 Codex 模型连接及“控制此电脑”的远程控制连接自动使用 Windows 系统代理。登录 Windows 后，独立 EXE 在后台常驻；Codex 仍从原来的图标启动，无需专用启动脚本。
 
+## 在新电脑上安装
+
+1. 从 [Releases](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest) 下载 `CodexProxyGuardian-Setup.exe`，或把已有的安装 EXE 复制到新电脑。
+2. 在当前 Windows 用户下双击 EXE。安装界面会自动执行安装，无须下载源码或手动运行 PowerShell。
+3. 出现“安装完成”后，完整退出并重新打开 Codex。保持 Windows 系统代理开启，再使用模型对话或进入“连接 → 控制此电脑”设置远程控制。
+
+安装包内含守护程序和安装组件，安装过程不下载依赖。目标电脑需已有 .NET Framework 4.8 和 Windows PowerShell 5.1；它不会安装 Codex、代理软件，也不会迁移原电脑的登录账户、代理节点或配对设备。每台电脑都会读取自己的系统代理，并生成自己的本机路由值。
+
+这是未签名的自制安装包。企业管理策略可能限制执行；它不会关闭或修改这些策略。仓库为私有时，下载 Release 需要有仓库访问权限。
+
 ```text
 Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.0.1:7897）→ chatgpt.com
 ```
@@ -29,11 +39,20 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\build.ps1
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 ```
 
-使用 Windows 自带的 .NET Framework C# 编译器，无须下载 NuGet 包或安装 .NET SDK。输出为 `build\CodexProxyGuardian.exe`。也提供 `CodexProxyGuardian.csproj`，可使用具有 .NET Framework 4.8 开发工具的 Visual Studio 打开。
+使用 Windows 自带的 .NET Framework C# 编译器，无须下载 NuGet 包或安装 .NET SDK。构建生成：
 
-自动检查覆盖配置增删、重复安装、保留其他配置、旧配置迁移以及本机入口的请求限制。测试使用随机端口，不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
+| 文件 | 用途 |
+| --- | --- |
+| `build\CodexProxyGuardian-Setup.exe` | 单文件安装包，复制到新电脑后双击即可安装。 |
+| `build\CodexProxyGuardian.exe` | 后台程序本体，需由安装工具生成配套配置，不应直接作为安装包分发。 |
 
-## 安装
+`CodexProxyGuardian.csproj` 用于在 Visual Studio 中编辑和构建后台程序；完整安装包通过 `build.ps1` 构建，安装界面源码为 `src/Setup.cs`。
+
+自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移、远程控制路径、本机入口的请求限制，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口，不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
+
+可选的完整安装检查：`powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\install-smoke.ps1`。它会创建独立的测试目录、随机端口和临时计划任务，测试首次安装、重复安装与卸载，然后清理测试任务；不会重装正在使用的守护程序。测试文件保留在被 Git 忽略的 `build` 目录中。
+
+## 从源码安装与升级
 
 先确认 Windows 系统代理已经打开，再执行：
 
@@ -47,7 +66,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 
 默认端口为 `43871`；首次安装可通过 `-Port` 指定其他端口。已有安装会保留自己的随机路由值，禁止无意覆盖用户已有的其他 `openai_base_url` 或 `chatgpt_base_url`。安装前会在安装目录的 `backups` 中备份配置。第一次从仅模型代理版本升级后，远程控制可能需要重新添加设备，因为 Codex 按连接地址保存配对状态。
 
-升级本程序时重新运行安装工具，会短暂重启守护程序并中断现有模型连接，应在 Codex 空闲时进行。整理或拉取这个 Git 仓库本身不会更新正在运行的程序。
+升级本程序时双击新的安装 EXE，或重新运行源码安装工具。升级会短暂重启守护程序并中断现有模型和远程控制连接，应在 Codex 空闲时进行。整理或拉取这个 Git 仓库本身不会更新正在运行的程序。
 
 ## 运行行为与限制
 
@@ -59,7 +78,9 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 - 自启动发生在当前用户登录 Windows 后，不是在登录前运行的系统服务。
 - 程序不位于 Codex 更新目录中。正常更新不会覆盖它，但未来 Codex 若修改接口或配置语义，需要重新验证。
 
-状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数；模型握手成功不代表远程控制已连接。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
+状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数。这些数值在进程重启后归零，是累计记录，不表示当前在线设备数；`failures` 只统计转发异常，不包含所有上游 HTTP 错误。模型握手成功不代表远程控制已连接。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
+
+遇到问题请查看 [故障排查](docs/troubleshooting.md)，其中说明了代理连通、WebSocket 握手和设备实际连接之间的区别。
 
 ## 停用
 
@@ -69,11 +90,23 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\uninstall.ps1
 ```
 
+通过 EXE 安装、没有源码目录时，可在 PowerShell 中执行安装目录内的卸载工具：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "$env:LOCALAPPDATA\OpenAI\CodexProxyGuardian\uninstall.ps1"
+```
+
+如果安装时使用了自定义 `CODEX_HOME`，卸载时应使用相同设置。开发测试中的自定义安装目录和任务名，也应通过对应参数传给卸载工具。
+
 卸载工具只移除该程序拥有的 `openai_base_url` 和 `chatgpt_base_url`，保留其他 Codex 配置，结束后台进程并删除登录计划任务。安装文件和备份保留，便于检查或恢复。重新打开 Codex 后回到原来的连接方式。
 
 ## 已完成的连接验证
 
 初始版本于 2026-09-12 在 Windows 上通过真实 Codex 对话验证，包含普通 HTTP 请求、WebSocket `101 Switching Protocols` 和模型回复 `OK`。另一次测试直接读取已保存的用户配置并成功完成对话。此验证是当时的运行结果，不代表所有代理或未来 Codex 版本都兼容。
+
+补齐远程控制转发后，2026-09-12 04:51（北京时间）日志记录了 `101 Switching Protocols remoteControl=True`，Codex 的远程控制状态变为 `Connected`；用户随后确认远程连接可用。该记录同时验证了远程控制通道，不能用此前的模型测试代替。
+
+单文件安装包已经完成内嵌文件校验，以及隔离环境下的首次安装、重复安装、登录计划任务启动和卸载验证。测试确认原有 Codex 配置、用户级代理环境变量和正在使用的守护进程没有被修改。
 
 Codex 提供的服务器地址配置见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 

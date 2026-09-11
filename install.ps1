@@ -1,11 +1,16 @@
 [CmdletBinding()]
-param([ValidateRange(1024,65535)][int]$Port = 43871)
+param(
+    [ValidateRange(1024,65535)][int]$Port = 43871,
+    [string]$PrebuiltExecutable,
+    [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'OpenAI\CodexProxyGuardian'),
+    [string]$CodexConfigDirectory,
+    [string]$ScheduledTaskName = 'CodexProxyGuardian'
+)
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'scripts\Config.psm1') -Force
-$installDirectory = Join-Path $env:LOCALAPPDATA 'OpenAI\CodexProxyGuardian'
 $executable = Join-Path $installDirectory 'CodexProxyGuardian.exe'
 $settingsPath = Join-Path $installDirectory 'settings.json'
-$codexDirectory = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$codexDirectory = if ($CodexConfigDirectory) { $CodexConfigDirectory } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $configPath = Join-Path $codexDirectory 'config.toml'
 $original = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllText($configPath) } else { '' }
 if (Test-Path -LiteralPath $settingsPath) {
@@ -16,25 +21,31 @@ if ($settings.Route -notmatch '^[a-fA-F0-9]{32,}$') { throw 'Invalid existing ro
 $baseUrl = 'http://127.0.0.1:' + $Port + '/' + $settings.Route + '/backend-api/codex'
 # Validate ownership before changing the running service or files.
 $updated = Set-GuardianConfig -Text $original -BaseUrl $baseUrl
-& (Join-Path $PSScriptRoot 'build.ps1')
+if ($PrebuiltExecutable) {
+    if (-not (Test-Path -LiteralPath $PrebuiltExecutable -PathType Leaf)) { throw 'Embedded guardian executable is missing.' }
+    $builtExecutable = (Resolve-Path -LiteralPath $PrebuiltExecutable).Path
+} else {
+    & (Join-Path $PSScriptRoot 'build.ps1')
+    $builtExecutable = Join-Path $PSScriptRoot 'build\CodexProxyGuardian.exe'
+}
 New-Item -ItemType Directory -Path $installDirectory,$codexDirectory -Force | Out-Null
 $backupDirectory = Join-Path $installDirectory 'backups'
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
 if (Test-Path -LiteralPath $configPath) {
     Copy-Item -LiteralPath $configPath -Destination (Join-Path $backupDirectory ('config-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.toml'))
 }
-$previousTask = Get-ScheduledTask -TaskName 'CodexProxyGuardian' -ErrorAction SilentlyContinue
-if ($previousTask) { Stop-ScheduledTask -TaskName 'CodexProxyGuardian' }
+$previousTask = Get-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction SilentlyContinue
+if ($previousTask) { Stop-ScheduledTask -TaskName $ScheduledTaskName }
 Get-Process CodexProxyGuardian -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $executable } | ForEach-Object { $_.Kill(); $_.WaitForExit() }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'build\CodexProxyGuardian.exe') -Destination $executable -Force
+Copy-Item -LiteralPath $builtExecutable -Destination $executable -Force
 $settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $executable -WorkingDirectory $installDirectory
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $options = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName 'CodexProxyGuardian' -Action $action -Trigger $trigger -Principal $principal -Settings $options -Description 'Codex model and remote-control requests through the current Windows system proxy.' -Force | Out-Null
-Start-ScheduledTask -TaskName 'CodexProxyGuardian'
+Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $options -Description 'Codex model and remote-control requests through the current Windows system proxy.' -Force | Out-Null
+Start-ScheduledTask -TaskName $ScheduledTaskName
 $ready = $false
 for ($i=0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 200
