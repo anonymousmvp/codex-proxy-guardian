@@ -38,6 +38,7 @@ public static class CodexProxyGuardian {
     static long Requests, Upgrades, Failures, RemoteRequests, RemoteUpgrades;
     static long AppsMcpRequests, AppsMcpAuthenticatedRequests;
     const string Destination = "chatgpt.com";
+    const int UpstreamResponseTimeoutMilliseconds = 600000;
 
     [STAThread]
     public static int Main(string[] args) {
@@ -77,29 +78,41 @@ public static class CodexProxyGuardian {
         public byte[] Remainder;
     }
 
-    static async Task<Header> ReadHeader(Stream stream) {
-        using (var collected = new MemoryStream()) {
-            var buffer = new byte[4096];
-            while (collected.Length <= 65536) {
-                var read = stream.ReadAsync(buffer, 0, buffer.Length);
-                if (await Task.WhenAny(read, Task.Delay(20000)) != read)
-                    throw new TimeoutException("Header timeout");
-                int count = await read;
-                if (count == 0) throw new EndOfStreamException();
-                long before = collected.Length;
-                collected.Write(buffer, 0, count);
-                var data = collected.GetBuffer();
-                for (int i = (int)Math.Max(0, before - 3); i + 3 < collected.Length; i++) {
-                    if (data[i] == 13 && data[i+1] == 10 && data[i+2] == 13 && data[i+3] == 10) {
-                        int end = i + 4;
-                        var remainder = new byte[collected.Length - end];
-                        Buffer.BlockCopy(data, end, remainder, 0, remainder.Length);
-                        return new Header { Text = Encoding.ASCII.GetString(data, 0, end), Remainder = remainder };
+    static async Task<Header> ReadHeader(Stream stream, int timeoutMilliseconds = 20000) {
+        using (var collected = new MemoryStream())
+        using (var timeout = new CancellationTokenSource()) {
+            var deadline = Task.Delay(timeoutMilliseconds, timeout.Token);
+            try {
+                var buffer = new byte[4096];
+                while (collected.Length <= 65536) {
+                    var read = stream.ReadAsync(buffer, 0, buffer.Length);
+                    if (await Task.WhenAny(read, deadline) != read)
+                        throw new TimeoutException("Header timeout");
+                    int count = await read;
+                    if (count == 0) throw new EndOfStreamException();
+                    long before = collected.Length;
+                    collected.Write(buffer, 0, count);
+                    var data = collected.GetBuffer();
+                    for (int i = (int)Math.Max(0, before - 3); i + 3 < collected.Length; i++) {
+                        if (data[i] == 13 && data[i+1] == 10 && data[i+2] == 13 && data[i+3] == 10) {
+                            int end = i + 4;
+                            if (end > 65536) throw new IOException("Header too large");
+                            var remainder = new byte[collected.Length - end];
+                            Buffer.BlockCopy(data, end, remainder, 0, remainder.Length);
+                            return new Header { Text = Encoding.ASCII.GetString(data, 0, end), Remainder = remainder };
+                        }
                     }
                 }
-            }
+                throw new IOException("Header too large");
+            } finally { timeout.Cancel(); }
         }
-        throw new IOException("Header too large");
+    }
+
+    static Task<Header> ReadResponseHeader(Stream stream) {
+        // Generating images and other non-streaming work can take minutes before
+        // sending headers. Keep the short timeout for local headers and CONNECT,
+        // but let the official service finish a response within a bounded deadline.
+        return ReadHeader(stream, UpstreamResponseTimeoutMilliseconds);
     }
 
     static async Task Connect(TcpClient client, string host, int port) {
@@ -202,6 +215,8 @@ public static class CodexProxyGuardian {
 
     static async Task Handle(TcpClient incoming) {
         bool responseStarted = false;
+        bool remoteControl = false, appsMcp = false;
+        string stage = "request-header";
         TcpClient remote = null;
         SslStream secure = null;
         try {
@@ -217,8 +232,8 @@ public static class CodexProxyGuardian {
             if (path == null) {
                 await Reply(local, 404, "Not found"); return;
             }
-            bool remoteControl = path.StartsWith("/backend-api/wham/remote/control/", StringComparison.Ordinal);
-            bool appsMcp = IsAppsMcpPath(path);
+            remoteControl = path.StartsWith("/backend-api/wham/remote/control/", StringComparison.Ordinal);
+            appsMcp = IsAppsMcpPath(path);
             var headers = new List<KeyValuePair<string,string>>();
             bool upgrade = false;
             foreach (string line in lines.Skip(1)) {
@@ -252,18 +267,22 @@ public static class CodexProxyGuardian {
             }
             Interlocked.Increment(ref Requests);
             if (remoteControl) Interlocked.Increment(ref RemoteRequests);
+            stage = "system-proxy";
             Uri proxy = ReadSystemProxy();
             remote = new TcpClient();
             remote.NoDelay = true;
+            stage = "proxy-connect";
             await Connect(remote, proxy.Host, proxy.Port);
             var transport = remote.GetStream();
             await Send(transport, "CONNECT " + Destination + ":443 HTTP/1.1\r\nHost: " + Destination + ":443\r\n\r\n");
+            stage = "connect-response";
             Header connected = await ReadHeader(transport);
             string[] connectLine = connected.Text.Split('\r')[0].Split(' ');
             if (connectLine.Length < 2 || connectLine[1] != "200" || connected.Remainder.Length != 0)
                 throw new IOException("System proxy refused CONNECT");
             // Default SslStream validation: certificate chain + chatgpt.com hostname.
             secure = new SslStream(transport, false);
+            stage = "tls";
             var tls = secure.AuthenticateAsClientAsync(Destination, null, SslProtocols.Tls12, true);
             if (await Task.WhenAny(tls, Task.Delay(20000)) != tls) throw new TimeoutException("TLS timeout");
             await tls;
@@ -278,18 +297,21 @@ public static class CodexProxyGuardian {
             }
             if (!upgrade) outgoing.Append("Connection: close\r\n");
             outgoing.Append("\r\n");
+            stage = "request-forward";
             await Send(secure, outgoing.ToString());
             if (request.Remainder.Length > 0) await secure.WriteAsync(request.Remainder, 0, request.Remainder.Length);
             Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
             // Stream response headers explicitly so successful WebSocket upgrades are verifiable.
             Task upload = local.CopyToAsync(secure);
-            Header response = await ReadHeader(secure);
+            stage = "response-header";
+            Header response = await ReadResponseHeader(secure);
             string status = response.Text.Split('\r')[0];
             if (status.StartsWith("HTTP/1.1 101 ")) {
                 Interlocked.Increment(ref Upgrades);
                 if (remoteControl) Interlocked.Increment(ref RemoteUpgrades);
             }
             Log("response", status + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
+            stage = "response-forward";
             await Send(local, response.Text);
             responseStarted = true;
             if (response.Remainder.Length > 0) await local.WriteAsync(response.Remainder, 0, response.Remainder.Length);
@@ -297,7 +319,7 @@ public static class CodexProxyGuardian {
             await Task.WhenAny(upload, download);
         } catch (Exception ex) {
             Interlocked.Increment(ref Failures);
-            Log("request-error", ex.GetType().Name);
+            Log("request-error", ex.GetType().Name + " stage=" + stage + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
             if (!responseStarted) try { Reply(incoming.GetStream(), 502, "Codex proxy connection failed. Check the Windows system proxy.").GetAwaiter().GetResult(); } catch { }
         } finally {
             if (secure != null) secure.Dispose();

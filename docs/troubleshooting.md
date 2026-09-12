@@ -50,6 +50,14 @@ Get-Content "$env:LOCALAPPDATA\OpenAI\CodexProxyGuardian\guardian.log" -Tail 20
 
 如果登录仅保存在系统凭据库（keyring），没有可读取且有效的 ChatGPT `auth.json`，当前兼容方式无法自动补齐登录。Gmail、GitHub 等连接器自身的账户授权仍由 Codex 管理；MCP 初始化成功也不能证明每个连接器已完成授权。此修复针对内置 `codex_apps`，独立配置的第三方 MCP 服务器仍需按各自的地址和认证方式排查。
 
+## 图片生成约 106 秒后返回本机 502
+
+若图片工具报 `Codex proxy connection failed. Check the Windows system proxy.`，这是守护程序生成的错误正文，不能据此认定官方图片服务故障。旧版将读取上游响应头的等待也限制为 20 秒；图片生成尚未返回响应头时就会被本机切断。一次已确认的故障中，三次工具调用均在约 106 秒后失败，最后一次 `502` 与守护程序的 `TimeoutException` 时间对应，期间可见反复约 20 秒的等待和重试。
+
+修复版本将上游响应头的总等待期限设为 10 分钟，保持连接建立、TLS、会话和远程控制路由不变。分块响应不能无限重置期限；响应头读完后，正文和 WebSocket 仍流式转发。升级不需要修改 Codex 地址、重新登录或重新配对，但守护程序重启会让现有连接短暂重连。
+
+新的 `request-error` 仅增加阶段及远控/MCP分类，不记录 URL、请求头、图片提示词或凭据。`stage=response-header` 表示等待服务器响应头失败；`proxy-connect`、`connect-response`、`tls` 则分别指向系统代理连接、CONNECT 响应和 TLS 握手阶段。应同时对照错误类型和实际调用结果，避免把所有 `502` 都当作系统代理未开启。
+
 ## 提示“请确保仅有一个 ChatGPT 实例在运行”
 
 这个界面提示不足以单独确定原因。先检查是否确实启动了多个桌面主实例。任务管理器中多个 `ChatGPT.exe` 也可能是同一个应用的渲染、GPU 或网络子进程，不能仅按数量判断多开，也不要批量结束它们。

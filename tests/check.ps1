@@ -39,6 +39,10 @@ foreach($path in @('/backend-api/codex/responses','/backend-api/wham/remote/cont
 Assert-True ($null -eq $routing.Invoke($null,[object[]]@("/$testRoute/unrelated",$testRoute))) 'Non-backend route was accepted.'
 Write-Output 'Remote-control route checks passed.'
 
+Add-Type -Path (Join-Path $PSScriptRoot 'HeaderTransportChecks.cs')
+[GuardianTransportChecks]::Run($assembly)
+Write-Output 'Header transport checks passed: real 21-second response, original 20-second failure, total deadlines, fragmented HTTP/chunked/WebSocket bytes, 64 KiB limits.'
+
 $checkDirectory = Join-Path $project ('build\check-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $checkDirectory | Out-Null
 $authDirectory = Join-Path $checkDirectory 'synthetic-codex'

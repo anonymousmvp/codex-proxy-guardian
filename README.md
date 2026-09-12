@@ -31,6 +31,8 @@ Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.
 
 仅转发到 `chatgpt.com/backend-api` 下的接口。模型连接使用 `openai_base_url`，远程控制、内置应用 MCP 和相关账户接口使用 `chatgpt_base_url`；仅设置前者无法代理远程控制。浏览器、更新下载、SSH、独立 MCP 服务器等其他连接不在此范围。该项目不是通用代理工具，也不是 OpenAI 官方组件。
 
+`chatgpt_base_url` 是共享后端地址，也会影响内置图片生成等功能；当前核查的 Codex 版本没有独立的远程控制后端地址配置。因此本程序保留这些请求的正常转发，不通过路径白名单将它们拒绝。等待官方服务器响应头的上限为 10 分钟，以兼容图片生成等较慢请求；本机请求头、CONNECT 响应头和 TLS 握手仍使用 20 秒限制，TCP 连接仍为 15 秒。响应正文及 WebSocket 帧继续流式转发。
+
 Codex 不会向 localhost MCP 地址自动发送 ChatGPT 登录凭据。为兼容这个安全边界，本程序仅在固定的 `/backend-api/ps/mcp` 接口缺少 `Authorization` 时，从当前 Codex 配置目录读取已有的 ChatGPT 访问令牌和账户 ID，向固定的官方服务器附带它们。每个请求重新读取，跟随登录、账户切换和令牌更新；不会复制、缓存、刷新或记录令牌。已有授权原样保留，账户冲突或登录文件不可用时返回 `401`。仅存放在系统钥匙串中、没有 `auth.json` 的登录暂不支持自动补齐；本程序不会更改凭据存储方式。
 
 ## 构建和检查
@@ -52,6 +54,8 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 `CodexProxyGuardian.csproj` 用于在 Visual Studio 中编辑和构建后台程序；完整安装包通过 `build.ps1` 构建，安装界面源码为 `src/Setup.cs`。
 
 自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移、远程控制路径、MCP 凭据范围与轮换、本机入口的请求限制，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口和临时目录中的合成登录文件，不读取真实登录凭据、不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
+
+响应等待回归测试使用内存中的延迟数据流，验证超过 20 秒才返回的响应、总等待期限、分块头、HTTP 正文和 WebSocket 首帧的字节保留，以及 64 KiB 头大小限制。
 
 可选的完整安装检查：`powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\install-smoke.ps1`。它会创建独立的测试目录、随机端口和临时计划任务，测试首次安装、重复安装与卸载，然后清理测试任务；不会重装正在使用的守护程序。测试文件保留在被 Git 忽略的 `build` 目录中。
 
@@ -122,6 +126,8 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "$env:LOCALAPPDATA
 单文件安装包已经完成内嵌文件校验，以及隔离环境下的首次安装、重复安装、登录计划任务启动和卸载验证。测试确认原有 Codex 配置、用户级代理环境变量和正在使用的守护进程没有被修改。
 
 2026-09-12 修复了本机内置应用 MCP 因未携带 ChatGPT 登录而返回 `451 no_biscuit_no_service` 的问题。更新本机安装后，在请求端不主动提供授权的情况下，实际完成 MCP `initialize` 和 `tools/list`，当时列出 224 个工具（Gmail 21 个、GitHub 90 个），桌面日志记录 `codex_apps status=ready`，远程控制也重新完成 `101` 握手。这验证了 MCP 初始化、工具加载及远程通道，未执行邮件发送或仓库写入；工具数量随账户连接和版本变化。
+
+同日修复了图片生成被 20 秒响应头等待切断的问题。隔离测试复现旧超时并验证延迟响应可完成；只替换本机 EXE 后，实际完成一次文字生成图片、一次带参考图的编辑、一次无工具的模型对话，以及 Gmail/GitHub 连接器只读调用。远控重新完成注册和 `101` 握手，测试结束时守护程序转发失败计数为零；未代替用户从手机操作远控。升级前后检查确认 Codex 配置、守护程序设置、Windows 系统代理和计划任务定义均未改变。
 
 Codex 提供的服务器地址配置见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
