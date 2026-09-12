@@ -30,6 +30,7 @@ try {
         & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File (Join-Path $payloadDirectory 'install.ps1') -PrebuiltExecutable (Join-Path $payloadDirectory 'Guardian.exe') -InstallDirectory $installDirectory -CodexConfigDirectory $configDirectory -ScheduledTaskName $taskName -Port $port
         if($LASTEXITCODE -ne 0) {throw "Installation pass $pass failed."}
         $settings = Get-Content -LiteralPath (Join-Path $installDirectory 'settings.json') -Raw | ConvertFrom-Json
+        if($settings.CodexConfigDirectory -ne [IO.Path]::GetFullPath($configDirectory)) {throw 'MCP credentials do not use the isolated Codex directory.'}
         if($route -and $route -ne $settings.Route) {throw 'Reinstall changed the private route.'}
         $route = $settings.Route
         $content = [IO.File]::ReadAllText($configPath)

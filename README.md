@@ -1,6 +1,6 @@
 # Codex Proxy Guardian
 
-让 Windows 上的 Codex 模型连接及“控制此电脑”的远程控制连接自动使用 Windows 系统代理。登录 Windows 后，独立 EXE 在后台常驻；Codex 仍从原来的图标启动，无需专用启动脚本。
+让 Windows 上的 Codex 模型连接、“控制此电脑”的远程控制连接及内置应用连接器自动使用 Windows 系统代理。登录 Windows 后，独立 EXE 在后台常驻；Codex 仍从原来的图标启动，无需专用启动脚本。
 
 ## 在新电脑上安装
 
@@ -24,11 +24,14 @@ Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.
 - 显式 HTTP/HTTPS 系统代理，通过 HTTP CONNECT 隧道连接服务器；TLS 证书校验保持开启。
 - Codex 模型请求、HTTP 流式响应和 WebSocket。
 - 远程控制的注册、令牌刷新、配对、设备接口与 WebSocket。
+- Gmail、GitHub 等通过 Codex 内置 `codex_apps` MCP 使用的应用连接器，需使用 ChatGPT 登录并将凭据保存在对应 Codex 配置目录的 `auth.json` 中。
 - 使用同一份用户配置的 Codex 桌面应用和 Codex CLI。
 - 用户登录后自启动；进程异常退出后，计划任务每分钟尝试重新启动，最多 999 次。
 - 不更改全局代理环境变量，不注入其他进程，不安装证书或网络驱动。
 
-仅转发到 `chatgpt.com/backend-api` 下的接口。模型连接使用 `openai_base_url`，远程控制和相关账户接口使用 `chatgpt_base_url`；仅设置前者无法代理远程控制。浏览器、更新下载、SSH、独立 MCP 服务器等其他连接不在此范围。该项目不是通用代理工具，也不是 OpenAI 官方组件。
+仅转发到 `chatgpt.com/backend-api` 下的接口。模型连接使用 `openai_base_url`，远程控制、内置应用 MCP 和相关账户接口使用 `chatgpt_base_url`；仅设置前者无法代理远程控制。浏览器、更新下载、SSH、独立 MCP 服务器等其他连接不在此范围。该项目不是通用代理工具，也不是 OpenAI 官方组件。
+
+Codex 不会向 localhost MCP 地址自动发送 ChatGPT 登录凭据。为兼容这个安全边界，本程序仅在固定的 `/backend-api/ps/mcp` 接口缺少 `Authorization` 时，从当前 Codex 配置目录读取已有的 ChatGPT 访问令牌和账户 ID，向固定的官方服务器附带它们。每个请求重新读取，跟随登录、账户切换和令牌更新；不会复制、缓存、刷新或记录令牌。已有授权原样保留，账户冲突或登录文件不可用时返回 `401`。仅存放在系统钥匙串中、没有 `auth.json` 的登录暂不支持自动补齐；本程序不会更改凭据存储方式。
 
 ## 构建和检查
 
@@ -48,7 +51,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 
 `CodexProxyGuardian.csproj` 用于在 Visual Studio 中编辑和构建后台程序；完整安装包通过 `build.ps1` 构建，安装界面源码为 `src/Setup.cs`。
 
-自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移、远程控制路径、本机入口的请求限制，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口，不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
+自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移、远程控制路径、MCP 凭据范围与轮换、本机入口的请求限制，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口和临时目录中的合成登录文件，不读取真实登录凭据、不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
 
 可选的完整安装检查：`powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\install-smoke.ps1`。它会创建独立的测试目录、随机端口和临时计划任务，测试首次安装、重复安装与卸载，然后清理测试任务；不会重装正在使用的守护程序。测试文件保留在被 Git 忽略的 `build` 目录中。
 
@@ -60,7 +63,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 ```
 
-安装工具会构建 EXE，保存到 `%LOCALAPPDATA%\OpenAI\CodexProxyGuardian`，创建 `CodexProxyGuardian` 登录计划任务，并在 Codex 用户配置中设置 `openai_base_url` 和 `chatgpt_base_url`。默认配置文件为 `%USERPROFILE%\.codex\config.toml`；若设置了 `CODEX_HOME`，则使用对应目录。
+安装工具会构建 EXE，保存到 `%LOCALAPPDATA%\OpenAI\CodexProxyGuardian`，创建 `CodexProxyGuardian` 登录计划任务，并在 Codex 用户配置中设置 `openai_base_url` 和 `chatgpt_base_url`。默认配置文件为 `%USERPROFILE%\.codex\config.toml`；若设置了 `CODEX_HOME`，则使用对应目录。安装时将配置目录保存为本机 `settings.json` 的 `CodexConfigDirectory`，确保计划任务使用同一份登录文件；不会把登录凭据写进该设置文件。
 
 安装后完整退出并重新打开 Codex 一次。之后使用原来的桌面、开始菜单或任务栏图标。安装脚本仅在安装或升级时运行，日常后台运行不依赖 PowerShell。
 
@@ -78,7 +81,9 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 - 自启动发生在当前用户登录 Windows 后，不是在登录前运行的系统服务。
 - 程序不位于 Codex 更新目录中。正常更新不会覆盖它，但未来 Codex 若修改接口或配置语义，需要重新验证。
 
-状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数。这些数值在进程重启后归零，是累计记录，不表示当前在线设备数；`failures` 只统计转发异常，不包含所有上游 HTTP 错误。模型握手成功不代表远程控制已连接。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
+状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数。这些数值在进程重启后归零，是累计记录，不表示当前在线设备数；`failures` 统计转发和本机 MCP 认证异常，不包含所有上游 HTTP 错误。模型握手成功不代表远程控制已连接。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
+
+`appsMcpRequests` 记录通过入口与方法检查的内置 MCP 请求，`appsMcpAuthenticatedRequests` 记录自动补齐登录的次数；后者不等于工具调用成功次数。MCP 响应日志标记 `appsMcp=True`，便于区分模型与连接器请求。`mcp-auth-error` 表示登录文件不可用或账户不匹配，也计入 `failures`，不会记录凭据、账户 ID 或文件内容。
 
 遇到问题请查看 [故障排查](docs/troubleshooting.md)，其中说明了代理连通、WebSocket 握手和设备实际连接之间的区别。
 
@@ -107,6 +112,8 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "$env:LOCALAPPDATA
 补齐远程控制转发后，2026-09-12 04:51（北京时间）日志记录了 `101 Switching Protocols remoteControl=True`，Codex 的远程控制状态变为 `Connected`；用户随后确认远程连接可用。该记录同时验证了远程控制通道，不能用此前的模型测试代替。
 
 单文件安装包已经完成内嵌文件校验，以及隔离环境下的首次安装、重复安装、登录计划任务启动和卸载验证。测试确认原有 Codex 配置、用户级代理环境变量和正在使用的守护进程没有被修改。
+
+2026-09-12 修复了本机内置应用 MCP 因未携带 ChatGPT 登录而返回 `451 no_biscuit_no_service` 的问题。更新本机安装后，在请求端不主动提供授权的情况下，实际完成 MCP `initialize` 和 `tools/list`，当时列出 224 个工具（Gmail 21 个、GitHub 90 个），桌面日志记录 `codex_apps status=ready`，远程控制也重新完成 `101` 握手。这验证了 MCP 初始化、工具加载及远程通道，未执行邮件发送或仓库写入；工具数量随账户连接和版本变化。
 
 Codex 提供的服务器地址配置见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 

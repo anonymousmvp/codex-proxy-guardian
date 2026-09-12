@@ -11,6 +11,7 @@ Import-Module (Join-Path $PSScriptRoot 'scripts\Config.psm1') -Force
 $executable = Join-Path $installDirectory 'CodexProxyGuardian.exe'
 $settingsPath = Join-Path $installDirectory 'settings.json'
 $codexDirectory = if ($CodexConfigDirectory) { $CodexConfigDirectory } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$codexDirectory = [IO.Path]::GetFullPath($codexDirectory)
 $configPath = Join-Path $codexDirectory 'config.toml'
 $original = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllText($configPath) } else { '' }
 if (Test-Path -LiteralPath $settingsPath) {
@@ -21,6 +22,10 @@ if ($settings.Route -notmatch '^[a-fA-F0-9]{32,}$') { throw 'Invalid existing ro
 $baseUrl = 'http://127.0.0.1:' + $Port + '/' + $settings.Route + '/backend-api/codex'
 # Validate ownership before changing the running service or files.
 $updated = Set-GuardianConfig -Text $original -BaseUrl $baseUrl
+# The scheduled task may not inherit the installing shell's CODEX_HOME.
+# Persist only the directory, never a token or a copy of auth.json.
+if ($settings -is [System.Collections.IDictionary]) { $settings.CodexConfigDirectory = $codexDirectory }
+else { $settings | Add-Member -NotePropertyName CodexConfigDirectory -NotePropertyValue $codexDirectory -Force }
 if ($PrebuiltExecutable) {
     if (-not (Test-Path -LiteralPath $PrebuiltExecutable -PathType Leaf)) { throw 'Embedded guardian executable is missing.' }
     $builtExecutable = (Resolve-Path -LiteralPath $PrebuiltExecutable).Path

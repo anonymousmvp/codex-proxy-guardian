@@ -17,6 +17,17 @@ using Microsoft.Win32;
 public sealed class GuardianSettings {
     public int Port { get; set; }
     public string Route { get; set; }
+    public string CodexConfigDirectory { get; set; }
+}
+
+public sealed class GuardianChatGptAuth {
+    public string auth_mode { get; set; }
+    public GuardianChatGptTokens tokens { get; set; }
+}
+
+public sealed class GuardianChatGptTokens {
+    public string access_token { get; set; }
+    public string account_id { get; set; }
 }
 
 public static class CodexProxyGuardian {
@@ -25,6 +36,7 @@ public static class CodexProxyGuardian {
     static readonly SemaphoreSlim Slots = new SemaphoreSlim(64);
     static GuardianSettings Settings;
     static long Requests, Upgrades, Failures, RemoteRequests, RemoteUpgrades;
+    static long AppsMcpRequests, AppsMcpAuthenticatedRequests;
     const string Destination = "chatgpt.com";
 
     [STAThread]
@@ -133,8 +145,9 @@ public static class CodexProxyGuardian {
 
     static async Task Reply(Stream stream, int code, string message) {
         byte[] body = Encoding.UTF8.GetBytes(message);
-        string reason = code == 400 ? "Bad Request" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : "Bad Gateway";
-        await Send(stream, "HTTP/1.1 " + code + " " + reason + "\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + body.Length + "\r\n\r\n");
+        string reason = code == 400 ? "Bad Request" : code == 401 ? "Unauthorized" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : code == 405 ? "Method Not Allowed" : "Bad Gateway";
+        string allowed = code == 405 ? "Allow: GET, POST, DELETE\r\n" : "";
+        await Send(stream, "HTTP/1.1 " + code + " " + reason + "\r\n" + allowed + "Content-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + body.Length + "\r\n\r\n");
         await stream.WriteAsync(body, 0, body.Length);
     }
 
@@ -142,6 +155,49 @@ public static class CodexProxyGuardian {
         string prefix = "/" + route + "/backend-api";
         if (!(target.StartsWith(prefix + "/", StringComparison.Ordinal) || target == prefix)) return null;
         return target.Substring(route.Length + 1);
+    }
+
+    static bool IsAppsMcpPath(string path) {
+        return path == "/backend-api/ps/mcp" || path.StartsWith("/backend-api/ps/mcp?", StringComparison.Ordinal);
+    }
+
+    static bool IsSafeCredential(string value) {
+        return !String.IsNullOrEmpty(value) && value.All(c => c > 32 && c < 127);
+    }
+
+    static void AddAppsMcpAuthorization(string path, List<KeyValuePair<string,string>> headers) {
+        // Codex deliberately withholds ChatGPT auth from non-ChatGPT MCP origins.
+        // Complete auth only for its exact hosted MCP endpoint, after the private
+        // route and Origin checks. Never turn this into general credential injection.
+        if (!IsAppsMcpPath(path)) return;
+        var authorizations = headers.Where(h => h.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (authorizations.Count > 1 || (authorizations.Count == 1 && String.IsNullOrWhiteSpace(authorizations[0].Value)))
+            throw new InvalidDataException("Ambiguous MCP authorization");
+        if (authorizations.Count == 1) return;
+        GuardianChatGptAuth auth;
+        try {
+            string directory = Settings.CodexConfigDirectory;
+            if (String.IsNullOrWhiteSpace(directory)) directory = Environment.GetEnvironmentVariable("CODEX_HOME");
+            if (String.IsNullOrWhiteSpace(directory)) directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            string authFile = Path.Combine(directory, "auth.json");
+            // Read on each request so account switches, token rotation and logout
+            // take effect without restarting. No credentials are persisted or logged.
+            using (var input = new FileStream(authFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                if (input.Length > 1048576) throw new IOException("Auth file too large");
+                using (var reader = new StreamReader(input)) auth = new JavaScriptSerializer().Deserialize<GuardianChatGptAuth>(reader.ReadToEnd());
+            }
+        } catch {
+            throw new UnauthorizedAccessException("ChatGPT file credentials are unavailable");
+        }
+        if (auth == null || auth.auth_mode != "chatgpt" || auth.tokens == null ||
+            !IsSafeCredential(auth.tokens.access_token) || !IsSafeCredential(auth.tokens.account_id))
+            throw new UnauthorizedAccessException("ChatGPT file credentials are unavailable");
+        var accountHeaders = headers.Where(h => h.Key.Equals("ChatGPT-Account-ID", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (accountHeaders.Count > 1 || (accountHeaders.Count == 1 && accountHeaders[0].Value != auth.tokens.account_id))
+            throw new UnauthorizedAccessException("ChatGPT account does not match");
+        headers.Add(new KeyValuePair<string,string>("Authorization", "Bearer " + auth.tokens.access_token));
+        if (accountHeaders.Count == 0) headers.Add(new KeyValuePair<string,string>("ChatGPT-Account-ID", auth.tokens.account_id));
+        Interlocked.Increment(ref AppsMcpAuthenticatedRequests);
     }
 
     static async Task Handle(TcpClient incoming) {
@@ -162,6 +218,7 @@ public static class CodexProxyGuardian {
                 await Reply(local, 404, "Not found"); return;
             }
             bool remoteControl = path.StartsWith("/backend-api/wham/remote/control/", StringComparison.Ordinal);
+            bool appsMcp = IsAppsMcpPath(path);
             var headers = new List<KeyValuePair<string,string>>();
             bool upgrade = false;
             foreach (string line in lines.Skip(1)) {
@@ -175,6 +232,23 @@ public static class CodexProxyGuardian {
                 }
                 if (name.Equals("Upgrade", StringComparison.OrdinalIgnoreCase) && value.Equals("websocket", StringComparison.OrdinalIgnoreCase)) upgrade = true;
                 headers.Add(new KeyValuePair<string,string>(name,value));
+            }
+            if (appsMcp && first[0] != "GET" && first[0] != "POST" && first[0] != "DELETE") {
+                await Reply(local, 405, "Unsupported MCP method"); return;
+            }
+            if (appsMcp) Interlocked.Increment(ref AppsMcpRequests);
+            int authError = 0;
+            try { AddAppsMcpAuthorization(path, headers); }
+            catch (InvalidDataException) { authError = 400; }
+            catch (UnauthorizedAccessException) {
+                Interlocked.Increment(ref Failures);
+                Log("mcp-auth-error", "ChatGPT file credentials unavailable or account mismatch");
+                authError = 401;
+            }
+            if (authError != 0) {
+                await Reply(local, authError, authError == 400 ? "Ambiguous MCP authorization" :
+                    "MCP needs matching ChatGPT file credentials. Sign in to Codex using the configured Codex home.");
+                return;
             }
             Interlocked.Increment(ref Requests);
             if (remoteControl) Interlocked.Increment(ref RemoteRequests);
@@ -206,7 +280,7 @@ public static class CodexProxyGuardian {
             outgoing.Append("\r\n");
             await Send(secure, outgoing.ToString());
             if (request.Remainder.Length > 0) await secure.WriteAsync(request.Remainder, 0, request.Remainder.Length);
-            Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade + " remoteControl=" + remoteControl);
+            Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
             // Stream response headers explicitly so successful WebSocket upgrades are verifiable.
             Task upload = local.CopyToAsync(secure);
             Header response = await ReadHeader(secure);
@@ -215,7 +289,7 @@ public static class CodexProxyGuardian {
                 Interlocked.Increment(ref Upgrades);
                 if (remoteControl) Interlocked.Increment(ref RemoteUpgrades);
             }
-            Log("response", status + " remoteControl=" + remoteControl);
+            Log("response", status + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
             await Send(local, response.Text);
             responseStarted = true;
             if (response.Remainder.Length > 0) await local.WriteAsync(response.Remainder, 0, response.Remainder.Length);
@@ -243,6 +317,7 @@ public static class CodexProxyGuardian {
                     updatedUtc = DateTime.UtcNow.ToString("o"), requests = Interlocked.Read(ref Requests),
                     websocketUpgrades = Interlocked.Read(ref Upgrades), failures = Interlocked.Read(ref Failures),
                     remoteControlRequests = Interlocked.Read(ref RemoteRequests), remoteControlUpgrades = Interlocked.Read(ref RemoteUpgrades),
+                    appsMcpRequests = Interlocked.Read(ref AppsMcpRequests), appsMcpAuthenticatedRequests = Interlocked.Read(ref AppsMcpAuthenticatedRequests),
                     lastEvent = kind
                 }));
             } catch { }
