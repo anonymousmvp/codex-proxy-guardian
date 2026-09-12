@@ -1,17 +1,127 @@
-name: Build and check
+name: Build, check and release
 on:
   push:
+    branches:
+      - '**'
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: guardian-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-latest
+    outputs:
+      installer-sha256: ${{ steps.package.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Build
         shell: powershell
         run: ./build.ps1
       - name: Check configuration and local listener
         shell: powershell
         run: ./tests/check.ps1
+      - name: Hash tested installer
+        id: package
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -LiteralPath build/CodexProxyGuardian-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "$hash  CodexProxyGuardian-Setup.exe" | Set-Content -LiteralPath build/SHA256SUMS.txt -Encoding ascii
+      - name: Save tested installer for release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ github.sha }}
+          path: |
+            build/CodexProxyGuardian-Setup.exe
+            build/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: windows
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-${{ github.sha }}
+          path: release
+      - name: Publish current main as latest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+          INSTALLER_SHA256: ${{ needs.windows.outputs.installer-sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Test-CurrentMain {
+            $head = gh api "repos/$env:GH_REPO/git/ref/heads/main" --jq '.object.sha'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot verify the current main commit.' }
+            return $head.Trim() -eq $env:BUILD_SHA
+          }
+          if (-not (Test-CurrentMain)) {
+            Write-Output 'A newer main commit exists; skipping this release.'
+            exit 0
+          }
+
+          $asset = 'release/CodexProxyGuardian-Setup.exe'
+          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:INSTALLER_SHA256) { throw 'The installer differs from the tested build.' }
+          $checksumFile = 'release/SHA256SUMS.txt'
+          if ((Get-Content -LiteralPath $checksumFile -Raw).Trim() -ne "$hash  CodexProxyGuardian-Setup.exe") {
+            throw 'The checksum file differs from the tested build.'
+          }
+          $tag = "build-$env:BUILD_SHA"
+          $shortSha = $env:BUILD_SHA.Substring(0, 12)
+          $notes = @(
+            'Windows single-file installer built and checked by GitHub Actions.'
+            ''
+            "Source commit: $env:BUILD_SHA"
+            "SHA-256: $hash"
+            "Build: https://github.com/$env:GH_REPO/actions/runs/$env:GITHUB_RUN_ID"
+            ''
+            'Download CodexProxyGuardian-Setup.exe and run it to install or update.'
+          ) -join "`n"
+          $notesPath = Join-Path $env:RUNNER_TEMP 'guardian-release-notes.md'
+          Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
+          $existing = gh release view $tag --json isDraft,targetCommitish,assets 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --target $env:BUILD_SHA --title "Codex Proxy Guardian ($shortSha)" --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot create the draft release.' }
+            $existing = gh release view $tag --json isDraft,targetCommitish,assets
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot read the draft release.' }
+          }
+
+          $release = $existing | ConvertFrom-Json
+          if ($release.targetCommitish -ne $env:BUILD_SHA) { throw 'The release targets a different commit.' }
+          if ($release.isDraft) {
+            gh release edit $tag --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot update the draft release notes.' }
+            gh release upload $tag $asset $checksumFile --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot upload the tested installer.' }
+          } else {
+            # Published releases keep their original assets, including on reruns.
+            $installer = @($release.assets | Where-Object { $_.name -eq 'CodexProxyGuardian-Setup.exe' -and $_.size -gt 0 })
+            if ($installer.Count -ne 1) { throw 'The published release has no valid installer asset.' }
+            $checksum = @($release.assets | Where-Object { $_.name -eq 'SHA256SUMS.txt' -and $_.size -gt 0 })
+            if ($checksum.Count -ne 1) { throw 'The published release has no checksum file.' }
+          }
+
+          # Check again after uploading: an older run must not replace latest.
+          if (-not (Test-CurrentMain)) {
+            Write-Output 'Main changed during upload; leaving this release unpublished.'
+            exit 0
+          }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot publish the latest release.' }
+          "Latest installer: https://github.com/$env:GH_REPO/releases/latest/download/CodexProxyGuardian-Setup.exe" >> $env:GITHUB_STEP_SUMMARY

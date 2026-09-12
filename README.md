@@ -4,13 +4,13 @@
 
 ## 在新电脑上安装
 
-1. 从 [Releases](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest) 下载 `CodexProxyGuardian-Setup.exe`，或把已有的安装 EXE 复制到新电脑。
+1. 下载[最新安装包](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest/download/CodexProxyGuardian-Setup.exe) `CodexProxyGuardian-Setup.exe`，或把已有的安装 EXE 复制到新电脑；版本记录见 [Releases](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest)。
 2. 在当前 Windows 用户下双击 EXE。安装界面会自动执行安装，无须下载源码或手动运行 PowerShell。
 3. 出现“安装完成”后，完整退出并重新打开 Codex。保持 Windows 系统代理开启，再使用模型对话或进入“连接 → 控制此电脑”设置远程控制。
 
 安装包内含守护程序和安装组件，安装过程不下载依赖。目标电脑需已有 .NET Framework 4.8 和 Windows PowerShell 5.1；它不会安装 Codex、代理软件，也不会迁移原电脑的登录账户、代理节点或配对设备。每台电脑都会读取自己的系统代理，并生成自己的本机路由值。
 
-这是未签名的自制安装包。企业管理策略可能限制执行；它不会关闭或修改这些策略。仓库为私有时，下载 Release 需要有仓库访问权限。
+这是未签名的自制安装包。企业管理策略可能限制执行；它不会关闭或修改这些策略。仓库及 Release 公开，无须登录即可下载。
 
 ```text
 Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.0.1:7897）→ chatgpt.com
@@ -54,6 +54,14 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移、远程控制路径、MCP 凭据范围与轮换、本机入口的请求限制，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口和临时目录中的合成登录文件，不读取真实登录凭据、不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
 
 可选的完整安装检查：`powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\install-smoke.ps1`。它会创建独立的测试目录、随机端口和临时计划任务，测试首次安装、重复安装与卸载，然后清理测试任务；不会重装正在使用的守护程序。测试文件保留在被 Git 忽略的 `build` 目录中。
+
+## 自动发布安装包
+
+每次推送到 `main`，GitHub Actions 都会在 Windows 上运行 `build.ps1` 和 `tests/check.ps1`。全部成功后，为该提交创建 `build-<完整提交 SHA>` 的 Release，上传同一个经过检查的 `CodexProxyGuardian-Setup.exe` 和 `SHA256SUMS.txt` 并标记为 Latest。发布说明包含源码提交、构建记录和安装包 SHA-256；失败的构建不会替换已有安装包。
+
+下载入口固定为 [releases/latest/download/CodexProxyGuardian-Setup.exe](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest/download/CodexProxyGuardian-Setup.exe)，会跟随最新成功发布的版本更新。其他网站可以长期引用这个入口；使用下载中转时，应让中转服务请求这个完整地址。
+
+PR 和其他分支只构建、检查；发布任务仅对 `main` 开放写权限。并发更新会取消旧运行，发布前再次检查远端 `main`，避免旧提交覆盖 Latest。重新运行同一提交会复用已发布的安装包，未完成的草稿则继续上传和发布。也可在 Actions 的 `Build, check and release` 页面选择 `main` 手动运行，无须本机打包或手动打标签。
 
 ## 从源码安装与升级
 
