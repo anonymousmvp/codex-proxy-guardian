@@ -13,6 +13,18 @@ function Get-TopLevelProxyUrl {
     return $null
 }
 
+function Get-OwnedUrlVariants {
+    # Installations before the HTTPS listener wrote the same port and route with
+    # http://. Those entries belong to this program and are migrated, never treated
+    # as a foreign provider.
+    param([Parameter(Mandatory=$true)][string]$BaseUrl)
+    if (-not $BaseUrl.EndsWith('/codex')) { throw 'Model base URL must end in /codex.' }
+    $variants = New-Object System.Collections.Generic.List[string]
+    $variants.Add($BaseUrl)
+    if ($BaseUrl.StartsWith('https://')) { $variants.Add('http://' + $BaseUrl.Substring(8)) }
+    return ,$variants
+}
+
 function Remove-OwnedUrl {
     param([string]$Text,[string]$BaseUrl,[string]$Key)
     $current = Get-TopLevelProxyUrl -Text $Text -Key $Key
@@ -29,22 +41,26 @@ function Remove-OwnedUrl {
 
 function Remove-GuardianConfig {
     param([string]$Text, [Parameter(Mandatory=$true)][string]$BaseUrl)
-    if (-not $BaseUrl.EndsWith('/codex')) { throw 'Model base URL must end in /codex.' }
-    $chatgptUrl = $BaseUrl.Substring(0,$BaseUrl.Length-6)
-    $clean = Remove-OwnedUrl -Text $Text -BaseUrl $BaseUrl -Key 'openai_base_url'
-    return Remove-OwnedUrl -Text $clean -BaseUrl $chatgptUrl -Key 'chatgpt_base_url'
+    $clean = $Text
+    foreach ($modelUrl in (Get-OwnedUrlVariants -BaseUrl $BaseUrl)) {
+        $chatgptUrl = $modelUrl.Substring(0,$modelUrl.Length-6)
+        $clean = Remove-OwnedUrl -Text $clean -BaseUrl $modelUrl -Key 'openai_base_url'
+        $clean = Remove-OwnedUrl -Text $clean -BaseUrl $chatgptUrl -Key 'chatgpt_base_url'
+    }
+    return $clean
 }
 
 function Set-GuardianConfig {
     param([string]$Text, [Parameter(Mandatory=$true)][string]$BaseUrl)
-    if (-not $BaseUrl.EndsWith('/codex')) { throw 'Model base URL must end in /codex.' }
+    $owned = Get-OwnedUrlVariants -BaseUrl $BaseUrl
     $chatgptUrl = $BaseUrl.Substring(0,$BaseUrl.Length-6)
-    foreach ($entry in @(@{Key='openai_base_url';Value=$BaseUrl},@{Key='chatgpt_base_url';Value=$chatgptUrl})) {
+    $ownedChatgpt = @($owned | ForEach-Object { $_.Substring(0,$_.Length-6) })
+    foreach ($entry in @(@{Key='openai_base_url';Allowed=@($owned)},@{Key='chatgpt_base_url';Allowed=$ownedChatgpt})) {
         $current = Get-TopLevelProxyUrl -Text $Text -Key $entry.Key
-        if ($current -and $current -ne $entry.Value) { throw "A different $($entry.Key) exists. No configuration was changed." }
+        if ($current -and $entry.Allowed -cnotcontains $current) { throw "A different $($entry.Key) exists. No configuration was changed." }
     }
     $clean = Remove-GuardianConfig -Text $Text -BaseUrl $BaseUrl
     return "$beginMarker`r`nopenai_base_url = `"$BaseUrl`"`r`nchatgpt_base_url = `"$chatgptUrl`"`r`n$endMarker`r`n$clean"
 }
 
-Export-ModuleMember -Function Get-TopLevelProxyUrl,Set-GuardianConfig,Remove-GuardianConfig
+Export-ModuleMember -Function Get-TopLevelProxyUrl,Get-OwnedUrlVariants,Set-GuardianConfig,Remove-GuardianConfig

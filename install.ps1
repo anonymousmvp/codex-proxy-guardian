@@ -4,34 +4,52 @@ param(
     [string]$PrebuiltExecutable,
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'OpenAI\CodexProxyGuardian'),
     [string]$CodexConfigDirectory,
-    [string]$ScheduledTaskName = 'CodexProxyGuardian'
+    [string]$ScheduledTaskName = 'CodexProxyGuardian',
+    # The installer EXE and the automated checks add the root-store trust themselves.
+    [switch]$SkipCertificateTrust
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'scripts\Config.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'scripts\Certificate.psm1') -Force
 $executable = Join-Path $installDirectory 'CodexProxyGuardian.exe'
 $settingsPath = Join-Path $installDirectory 'settings.json'
 $codexDirectory = if ($CodexConfigDirectory) { $CodexConfigDirectory } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $codexDirectory = [IO.Path]::GetFullPath($codexDirectory)
 $configPath = Join-Path $codexDirectory 'config.toml'
 $original = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllText($configPath) } else { '' }
+$settings = @{}
 if (Test-Path -LiteralPath $settingsPath) {
-    $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    $existing = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    foreach ($property in $existing.PSObject.Properties) { $settings[$property.Name] = $property.Value }
     if ($settings.Port -ne $Port) { throw 'Existing installation uses a different port. Uninstall it before changing ports.' }
 } else { $settings = @{Port=$Port; Route=[Guid]::NewGuid().ToString('N')} }
 if ($settings.Route -notmatch '^[a-fA-F0-9]{32,}$') { throw 'Invalid existing route in settings.json.' }
-$baseUrl = 'http://127.0.0.1:' + $Port + '/' + $settings.Route + '/backend-api/codex'
+$baseUrl = 'https://127.0.0.1:' + $Port + '/' + $settings.Route + '/backend-api/codex'
 # Validate ownership before changing the running service or files.
 $updated = Set-GuardianConfig -Text $original -BaseUrl $baseUrl
 # The scheduled task may not inherit the installing shell's CODEX_HOME.
 # Persist only the directory, never a token or a copy of auth.json.
-if ($settings -is [System.Collections.IDictionary]) { $settings.CodexConfigDirectory = $codexDirectory }
-else { $settings | Add-Member -NotePropertyName CodexConfigDirectory -NotePropertyValue $codexDirectory -Force }
+$settings.CodexConfigDirectory = $codexDirectory
 if ($PrebuiltExecutable) {
     if (-not (Test-Path -LiteralPath $PrebuiltExecutable -PathType Leaf)) { throw 'Embedded guardian executable is missing.' }
     $builtExecutable = (Resolve-Path -LiteralPath $PrebuiltExecutable).Path
 } else {
     & (Join-Path $PSScriptRoot 'build.ps1')
     $builtExecutable = Join-Path $PSScriptRoot 'build\CodexProxyGuardian.exe'
+}
+# Reuse the existing local certificate; create a new one only when it is missing or near expiry.
+$previousThumbprint = if ($settings.ContainsKey('CertificateThumbprint')) { [string]$settings.CertificateThumbprint } else { '' }
+$certificate = Get-GuardianCertificate -Thumbprint $previousThumbprint
+if (-not (Test-GuardianCertificateCurrent -Certificate $certificate)) {
+    $certificate = New-GuardianCertificate
+    if ($previousThumbprint -and $previousThumbprint -ne $certificate.Thumbprint) {
+        try { Remove-GuardianCertificate -Thumbprint $previousThumbprint | Out-Null } catch { Write-Warning "Previous certificate $previousThumbprint was not removed: $($_.Exception.Message)" }
+    }
+}
+$settings.CertificateThumbprint = $certificate.Thumbprint
+if (-not $SkipCertificateTrust) {
+    try { Add-GuardianCertificateTrust -Certificate $certificate }
+    catch { throw "The local certificate must be trusted for Codex to connect. Windows asked for confirmation and it was not granted: $($_.Exception.Message)" }
 }
 New-Item -ItemType Directory -Path $installDirectory,$codexDirectory -Force | Out-Null
 $backupDirectory = Join-Path $installDirectory 'backups'

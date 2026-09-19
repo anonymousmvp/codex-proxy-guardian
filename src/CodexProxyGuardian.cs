@@ -1,4 +1,6 @@
 // Codex-only reverse tunnel. No registry writes, process injection, or TLS interception.
+// The local entry point speaks HTTPS with a machine-local certificate because Codex
+// requires an HTTPS chatgpt_base_url; upstream TLS to chatgpt.com is never intercepted.
 // Build: .NET Framework csc /target:winexe /r:System.Web.Extensions.dll
 using System;
 using System.Collections.Generic;
@@ -8,6 +10,7 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +21,9 @@ public sealed class GuardianSettings {
     public int Port { get; set; }
     public string Route { get; set; }
     public string CodexConfigDirectory { get; set; }
+    // SHA-1 thumbprint of the local server certificate in the current user's
+    // personal store. Empty keeps the legacy plain-HTTP listener (tests only).
+    public string CertificateThumbprint { get; set; }
 }
 
 public sealed class GuardianChatGptAuth {
@@ -35,8 +41,9 @@ public static class CodexProxyGuardian {
     static readonly object LogLock = new object();
     static readonly SemaphoreSlim Slots = new SemaphoreSlim(64);
     static GuardianSettings Settings;
+    static X509Certificate2 ServerCertificate;
     static long Requests, Upgrades, Failures, RemoteRequests, RemoteUpgrades;
-    static long AppsMcpRequests, AppsMcpAuthenticatedRequests;
+    static long AppsMcpRequests, AppsMcpAuthenticatedRequests, DesktopRequests;
     const string Destination = "chatgpt.com";
     const int UpstreamResponseTimeoutMilliseconds = 600000;
 
@@ -48,7 +55,9 @@ public static class CodexProxyGuardian {
             if (Settings == null || Settings.Port < 1024 || Settings.Port > 65535 ||
                 Settings.Route == null || Settings.Route.Length < 32 ||
                 !Settings.Route.All(Uri.IsHexDigit)) throw new Exception("Invalid settings");
-        } catch (Exception ex) { Log("fatal", ex.GetType().Name); return 1; }
+            if (!String.IsNullOrWhiteSpace(Settings.CertificateThumbprint))
+                ServerCertificate = LoadCertificate(Settings.CertificateThumbprint);
+        } catch (Exception ex) { Log("fatal", ex.GetType().Name + " " + ex.Message); return 1; }
         bool first;
         using (var mutex = new Mutex(true, "Local\\CodexProxyGuardian-" + Settings.Port, out first)) {
             if (!first) return 0;
@@ -59,11 +68,40 @@ public static class CodexProxyGuardian {
         }
     }
 
+    static X509Certificate2 LoadCertificate(string thumbprint) {
+        thumbprint = thumbprint.Trim();
+        if (thumbprint.Length != 40 || !thumbprint.All(Uri.IsHexDigit)) throw new Exception("Invalid certificate thumbprint");
+        using (var store = new X509Store(StoreName.My, StoreLocation.CurrentUser)) {
+            store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
+            foreach (X509Certificate2 candidate in store.Certificates.Find(X509FindType.FindByThumbprint, thumbprint, false)) {
+                if (candidate.HasPrivateKey) return candidate;
+            }
+        }
+        throw new Exception("Local certificate with private key not found");
+    }
+
+    static async Task<Stream> AcceptLocal(TcpClient incoming) {
+        NetworkStream raw = incoming.GetStream();
+        if (ServerCertificate == null) return raw;
+        var tls = new SslStream(raw, false);
+        try {
+            // Codex and the desktop app only trust the machine-local certificate that
+            // the installer placed in the user's trusted root store.
+            var handshake = tls.AuthenticateAsServerAsync(ServerCertificate, false, SslProtocols.Tls12, false);
+            if (await Task.WhenAny(handshake, Task.Delay(20000)) != handshake) throw new TimeoutException("Local TLS timeout");
+            await handshake;
+            return tls;
+        } catch {
+            tls.Dispose();
+            throw;
+        }
+    }
+
     static async Task Run() {
         var listener = new TcpListener(IPAddress.Loopback, Settings.Port);
         listener.Server.ExclusiveAddressUse = true;
         listener.Start(64);
-        Log("started", "127.0.0.1:" + Settings.Port);
+        Log("started", "127.0.0.1:" + Settings.Port + " tls=" + (ServerCertificate != null));
         while (true) {
             var incoming = await listener.AcceptTcpClientAsync();
             if (!Slots.Wait(0)) { incoming.Close(); continue; }
@@ -165,9 +203,21 @@ public static class CodexProxyGuardian {
     }
 
     static string GetUpstreamPath(string target, string route) {
+        bool routed;
+        string path = GetUpstreamPath(target, route, out routed);
+        return routed ? path : null;
+    }
+
+    static string GetUpstreamPath(string target, string route, out bool routed) {
         string prefix = "/" + route + "/backend-api";
-        if (!(target.StartsWith(prefix + "/", StringComparison.Ordinal) || target == prefix)) return null;
-        return target.Substring(route.Length + 1);
+        routed = target.StartsWith(prefix + "/", StringComparison.Ordinal) || target == prefix;
+        if (routed) return target.Substring(route.Length + 1);
+        // Codex derives the desktop app's "workspace backend origin" from
+        // chatgpt_base_url and the app then calls {origin}/backend-api/... directly,
+        // without the private route. Forward those verbatim; they never receive
+        // completed credentials, so the route still guards the MCP login helper.
+        if (target.StartsWith("/backend-api/", StringComparison.Ordinal)) return target;
+        return null;
     }
 
     static bool IsAppsMcpPath(string path) {
@@ -215,12 +265,14 @@ public static class CodexProxyGuardian {
 
     static async Task Handle(TcpClient incoming) {
         bool responseStarted = false;
-        bool remoteControl = false, appsMcp = false;
-        string stage = "request-header";
+        bool remoteControl = false, appsMcp = false, desktop = false;
+        string stage = "local-tls";
         TcpClient remote = null;
         SslStream secure = null;
+        Stream local = null;
         try {
-            var local = incoming.GetStream();
+            local = await AcceptLocal(incoming);
+            stage = "request-header";
             Header request = await ReadHeader(local);
             string[] lines = request.Text.Split(new string[] {"\r\n"}, StringSplitOptions.None);
             string[] first = lines[0].Split(' ');
@@ -228,12 +280,15 @@ public static class CodexProxyGuardian {
                 await Reply(local, 400, "HTTP/1.1 required"); return;
             }
             // This listener is not a forward proxy and never accepts arbitrary destinations.
-            string path = GetUpstreamPath(first[1], Settings.Route);
+            bool routed;
+            string path = GetUpstreamPath(first[1], Settings.Route, out routed);
             if (path == null) {
                 await Reply(local, 404, "Not found"); return;
             }
+            desktop = !routed;
             remoteControl = path.StartsWith("/backend-api/wham/remote/control/", StringComparison.Ordinal);
-            appsMcp = IsAppsMcpPath(path);
+            // Only routed requests come from Codex's own MCP client and may need login completion.
+            appsMcp = routed && IsAppsMcpPath(path);
             var headers = new List<KeyValuePair<string,string>>();
             bool upgrade = false;
             foreach (string line in lines.Skip(1)) {
@@ -253,7 +308,7 @@ public static class CodexProxyGuardian {
             }
             if (appsMcp) Interlocked.Increment(ref AppsMcpRequests);
             int authError = 0;
-            try { AddAppsMcpAuthorization(path, headers); }
+            try { if (appsMcp) AddAppsMcpAuthorization(path, headers); }
             catch (InvalidDataException) { authError = 400; }
             catch (UnauthorizedAccessException) {
                 Interlocked.Increment(ref Failures);
@@ -267,6 +322,7 @@ public static class CodexProxyGuardian {
             }
             Interlocked.Increment(ref Requests);
             if (remoteControl) Interlocked.Increment(ref RemoteRequests);
+            if (desktop) Interlocked.Increment(ref DesktopRequests);
             stage = "system-proxy";
             Uri proxy = ReadSystemProxy();
             remote = new TcpClient();
@@ -300,7 +356,7 @@ public static class CodexProxyGuardian {
             stage = "request-forward";
             await Send(secure, outgoing.ToString());
             if (request.Remainder.Length > 0) await secure.WriteAsync(request.Remainder, 0, request.Remainder.Length);
-            Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
+            Log("connected", "proxy=" + proxy.Host + ":" + proxy.Port + " websocket=" + upgrade + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp + " desktop=" + desktop);
             // Stream response headers explicitly so successful WebSocket upgrades are verifiable.
             Task upload = local.CopyToAsync(secure);
             stage = "response-header";
@@ -310,7 +366,7 @@ public static class CodexProxyGuardian {
                 Interlocked.Increment(ref Upgrades);
                 if (remoteControl) Interlocked.Increment(ref RemoteUpgrades);
             }
-            Log("response", status + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
+            Log("response", status + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp + " desktop=" + desktop);
             stage = "response-forward";
             await Send(local, response.Text);
             responseStarted = true;
@@ -319,11 +375,13 @@ public static class CodexProxyGuardian {
             await Task.WhenAny(upload, download);
         } catch (Exception ex) {
             Interlocked.Increment(ref Failures);
-            Log("request-error", ex.GetType().Name + " stage=" + stage + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp);
-            if (!responseStarted) try { Reply(incoming.GetStream(), 502, "Codex proxy connection failed. Check the Windows system proxy.").GetAwaiter().GetResult(); } catch { }
+            Log("request-error", ex.GetType().Name + " stage=" + stage + " remoteControl=" + remoteControl + " appsMcp=" + appsMcp + " desktop=" + desktop);
+            // Without a completed local handshake there is no stream to answer on.
+            if (!responseStarted && local != null) try { Reply(local, 502, "Codex proxy connection failed. Check the Windows system proxy.").GetAwaiter().GetResult(); } catch { }
         } finally {
             if (secure != null) secure.Dispose();
             if (remote != null) remote.Close();
+            if (local != null) local.Dispose();
             incoming.Close();
             Slots.Release();
         }
@@ -340,6 +398,7 @@ public static class CodexProxyGuardian {
                     websocketUpgrades = Interlocked.Read(ref Upgrades), failures = Interlocked.Read(ref Failures),
                     remoteControlRequests = Interlocked.Read(ref RemoteRequests), remoteControlUpgrades = Interlocked.Read(ref RemoteUpgrades),
                     appsMcpRequests = Interlocked.Read(ref AppsMcpRequests), appsMcpAuthenticatedRequests = Interlocked.Read(ref AppsMcpAuthenticatedRequests),
+                    desktopRequests = Interlocked.Read(ref DesktopRequests), tls = ServerCertificate != null,
                     lastEvent = kind
                 }));
             } catch { }

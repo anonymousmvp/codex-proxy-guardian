@@ -11,7 +11,38 @@ Get-Content "$env:LOCALAPPDATA\OpenAI\CodexProxyGuardian\status.json"
 Get-Content "$env:LOCALAPPDATA\OpenAI\CodexProxyGuardian\guardian.log" -Tail 20
 ```
 
-计划任务正常运行时显示 `Running`。如果任务已存在但没有运行，可以执行 `Start-ScheduledTask -TaskName CodexProxyGuardian`。若启动后立即退出，先检查日志，不要反复重装。
+计划任务正常运行时显示 `Running`。如果任务已存在但没有运行，可以执行 `Start-ScheduledTask -TaskName CodexProxyGuardian`。若启动后立即退出，先检查日志，不要反复重装；`fatal ... Local certificate with private key not found` 表示 `settings.json` 记录的证书已从当前用户的“个人”存储中消失，重新运行安装即可重新生成。
+
+日志第一行 `started 127.0.0.1:43871 tls=True` 表示入口以 HTTPS 运行；`status.json` 中 `tls` 为 `true`，`desktopRequests` 记录桌面端不带路由值的请求次数。桌面端自己的日志位于 `%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\Codex\Logs\<年>\<月>\<日>\codex-desktop-*.log`，其中 `method=account/read ... errorCode=null` 表示登录状态读取成功。
+
+## 桌面端反复停在登录页，浏览器却提示已登录
+
+自 Codex 桌面版 26.915（内核 0.155.0-alpha.9.2）起，`account/read` 要求 `chatgpt_base_url` 必须是 HTTPS 地址。使用旧版本程序（本机 `http://` 入口）时，桌面日志会出现：
+
+```text
+error ... Request failed ... error={"code":-32603,"message":"workspace backend must use an HTTPS origin without credentials"} ... method=account/read
+warning ... sa_server_request_failed ... errorMessage="Workspace routing is unavailable"
+```
+
+浏览器登录本身是成功的（`auth.json` 会被刷新），只是桌面端读不到账户信息，于是退回登录页。处理方式：用新的安装包点击“安装 / 升级”，在 Windows 询问时同意安装本机证书，然后完整退出并重新打开 Codex。升级后 `config.toml` 中两个地址都以 `https://127.0.0.1:` 开头，桌面日志中 `account/read` 的 `errorCode=null`。
+
+如果不想再使用本程序，点击“卸载”后 Codex 会直接连接官方地址，登录同样恢复；此时模型对话和内置连接器等普通 HTTP 请求由新版 Codex 自行使用 Windows 系统代理，但远程控制的 WebSocket 不读取系统代理，在必须走代理的网络里无法连接。
+
+## 证书未信任或被删除
+
+安装包把本机证书的公钥加入当前用户的“受信任的根证书颁发机构”，Windows 会弹出安全警告。在安装包窗口里状态显示“证书未信任”，或桌面端连不上、守护程序日志持续出现 `request-error IOException stage=local-tls`，通常是这一步被拒绝或证书被手动删除。再次点击“安装 / 升级”会重新信任已有证书；也可以在 `certmgr.msc` 的“受信任的根证书颁发机构”和“个人”中查看名为 `Codex Proxy Guardian` 的证书。
+
+只有当前 Windows 用户信任这张证书，它仅对 `127.0.0.1` 和 `localhost` 有效，私钥不可导出。卸载会删除它，Windows 可能再次询问是否删除根证书，选择“是”。
+
+## 桌面端部分请求返回 403，日志出现 sa_server_request_failed
+
+新版桌面端把 `chatgpt_base_url` 的来源当作“工作区后端”，自己直接请求 `https://127.0.0.1:43871/backend-api/...`（不带路由值，守护程序日志中 `desktop=True`）。其中 `/backend-api/wham/...`（云任务、用量、远程控制）和 `/backend-api/codex/...` 正常；而 `/backend-api/accounts/check/...`、`/backend-api/automations`、`/backend-api/payments/...`、`/backend-api/subscriptions/...`、`/backend-api/referrals/...` 等原本供 ChatGPT 网页使用的接口受 Cloudflare 浏览器校验保护，只接受真实浏览器的 TLS 指纹。经本程序（.NET TLS 客户端）转发时会收到 `403` 和一个要求“启用 JavaScript 和 Cookie”的挑战页，桌面日志记录为 `sa_server_request_failed ... status=403`。
+
+这不是代理断开：同一时刻 `/wham/usage` 等请求正常返回。已在 2026-09-19 用不同 User-Agent 经同一系统代理直接请求确认，这些接口对任何非浏览器 TLS 客户端都返回挑战页，与本程序无关。受影响的只是自动化列表、账单、推荐和促销等界面信息；登录、模型对话、远程控制、内置连接器和云任务不受影响。目前没有办法在保留远程控制代理的同时让这些请求通过；如果这些界面信息比远程控制更重要，可以卸载本程序。
+
+## 构建出的 EXE 被 Windows 拒绝执行
+
+Windows 11 开启“智能应用控制”时，会按文件哈希向云端查询未签名程序的信誉，偶尔会把某一次新构建的 `CodexProxyGuardian.exe` 判为拒绝（事件查看器 `Microsoft-Windows-CodeIntegrity/Operational` 中出现 3077/3033 事件，PowerShell 报 `应用程序控制策略已阻止此文件`）。同一份源码重新构建得到不同哈希后通常可以通过，`build.ps1` 会在构建后立即加载检测并给出提示。本程序不会关闭或修改该策略。
 
 `remoteControlRequests` 是远程控制接口收到的请求数，`remoteControlUpgrades` 是成功的远程控制 WebSocket 握手数。二者是该进程启动以来的累计值；已有成功记录不能证明连接此刻仍然在线。`lastEvent` 和 `updatedUtc` 也不是实时心跳，程序不主动按固定间隔刷新它们。
 
@@ -74,6 +105,8 @@ Get-Content "$env:LOCALAPPDATA\OpenAI\CodexProxyGuardian\guardian.log" -Tail 20
 | 上游返回 `401` | 上游未接受请求授权，可能需要通过 Codex 更新登录；无授权的其他接口连通性探测也可能出现此响应。 |
 | 内置 MCP 返回 `451`，内容为 `no_biscuit_no_service` | 此次已确认的故障中，请求未携带 ChatGPT 登录信息。检查是否使用修复后的守护程序，并结合 `appsMcp=True` 和登录信息补入计数判断；不能将所有 `451` 都归为同一原因。 |
 | 本程序返回 `502` | 读取系统代理、建立隧道、TLS 或转发过程中失败，结合 `request-error` 日志排查。 |
+| 桌面端 `sa_server_request_failed` 且 `status=403`，正文为要求启用 JavaScript 的网页 | Cloudflare 浏览器校验，见上文“桌面端部分请求返回 403”；核心功能不受影响。 |
+| 日志 `request-error IOException stage=local-tls` | 本机连接没有完成 TLS 握手：Codex 仍按旧的 `http://` 地址连接（重启 Codex），或证书未被信任（重新安装并同意信任）。 |
 | 上游其他 `4xx`/`5xx` | 请求可能已到达服务器，但被拒绝或处理失败；`failures=0` 不能排除这些情况。 |
 
 程序只使用当前显式 HTTP/HTTPS 系统代理。代理关闭、PAC-only 配置、SOCKS 配置或需要认证的代理不受支持；代理软件应在使用 Codex 时保持运行。

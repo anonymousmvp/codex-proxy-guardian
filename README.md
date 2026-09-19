@@ -5,18 +5,29 @@
 ## 在新电脑上安装
 
 1. 下载[最新安装包](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest/download/CodexProxyGuardian-Setup.exe) `CodexProxyGuardian-Setup.exe`，或把已有的安装 EXE 复制到新电脑；版本记录见 [Releases](https://github.com/anonymousmvp/codex-proxy-guardian/releases/latest)。
-2. 在当前 Windows 用户下双击 EXE。安装界面会自动执行安装，无须下载源码或手动运行 PowerShell。
-3. 出现“安装完成”后，完整退出并重新打开 Codex。保持 Windows 系统代理开启，再使用模型对话或进入“连接 → 控制此电脑”设置远程控制。
+2. 在当前 Windows 用户下双击 EXE。窗口会显示当前状态，并提供“安装 / 升级”和“卸载”两个按钮；同一个 EXE 既能安装也能卸载，无须下载源码或手动运行 PowerShell。
+3. 点击“安装 / 升级”。安装过程中 Windows 会弹出安全警告，询问是否安装名为 `Codex Proxy Guardian` 的本机证书，请选择“是”（原因见下文“本机 HTTPS 入口”）。
+4. 出现“安装完成”后，完整退出并重新打开 Codex。保持 Windows 系统代理开启，再使用模型对话或进入“连接 → 控制此电脑”设置远程控制。
 
-安装包内含守护程序和安装组件，安装过程不下载依赖。目标电脑需已有 .NET Framework 4.8 和 Windows PowerShell 5.1；它不会安装 Codex、代理软件，也不会迁移原电脑的登录账户、代理节点或配对设备。每台电脑都会读取自己的系统代理，并生成自己的本机路由值。
+遇到问题时再次双击同一个 EXE 并点击“卸载”：它会停止后台程序、删除自启动任务和本机证书（Windows 可能再次询问，选择“是”）、把 Codex 配置恢复原样并删除程序文件，只保留配置备份。换新电脑时用同一个 EXE 点击“安装 / 升级”即可。
 
-这是未签名的自制安装包。企业管理策略可能限制执行；它不会关闭或修改这些策略。仓库及 Release 公开，无须登录即可下载。
+安装包内含守护程序和安装组件，安装过程不下载依赖。目标电脑需已有 .NET Framework 4.8 和 Windows PowerShell 5.1；它不会安装 Codex、代理软件，也不会迁移原电脑的登录账户、代理节点或配对设备。每台电脑都会读取自己的系统代理，并生成自己的本机路由值和本机证书。
+
+这是未签名的自制安装包。企业管理策略可能限制执行；它不会关闭或修改这些策略。Windows 11 的智能应用控制按文件哈希判定，偶尔会拒绝某个新构建的未签名 EXE，重新构建通常即可通过；`build.ps1` 会在构建后立即检测这种拒绝。仓库及 Release 公开，无须登录即可下载。
 
 ```text
-Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.0.1:7897）→ chatgpt.com
+Codex → https://127.0.0.1:43871（本程序，本机证书）→ Windows 系统代理（例如 127.0.0.1:7897）→ chatgpt.com
 ```
 
 `43871` 是本程序的本机入口。系统代理软件已经占用 `7897`，两个程序不能监听同一地址的同一端口。每次建立新的上游连接时，本程序重新读取系统代理，所以代理端口改变后无须修改 Codex 的入口。
+
+## 本机 HTTPS 入口与证书
+
+2026-09-19 自动更新到的 Codex 桌面版 26.915（内核 0.155.0-alpha.9.2）在读取账户时要求 `chatgpt_base_url` 必须是 HTTPS 地址，否则 `account/read` 返回 `workspace backend must use an HTTPS origin without credentials`，桌面端会反复停在登录页，即使浏览器里已经登录成功。旧版本机 `http://` 入口因此失效。同时核查发现，Codex 的普通 HTTP 请求已经会自己读取 Windows 系统代理，但远程控制的 WebSocket 不会（只认 `HTTPS_PROXY` 环境变量），所以远程控制仍然需要经过本程序，本程序的入口必须改为 HTTPS。
+
+安装时在当前用户的“个人”证书存储中生成一张自签名证书（`CN=Codex Proxy Guardian`，仅对 `127.0.0.1` 和 `localhost` 有效，私钥不可导出，有效期 10 年），并把它的公钥加入当前用户的“受信任的根证书颁发机构”。加入时 Windows 会弹出安全警告，这是系统对所有用户级根证书的统一确认；拒绝后安装不会修改 Codex 配置。证书只存在于当前用户的存储中，不写入计算机级存储；升级复用已有证书，剩余有效期不足 30 天时才重新生成；卸载会同时删除私钥和信任。本程序只用它给 `127.0.0.1` 的本机连接加密，连接 chatgpt.com 仍使用官方证书并保持校验，不做 TLS 拦截。
+
+从旧版（本机 `http://` 入口）升级时，安装工具会把 Codex 配置里同一端口和路由值的 `http://` 条目原地改成 `https://`；其他来源的地址仍然会被拒绝覆盖。
 
 ## 支持范围
 
@@ -25,11 +36,14 @@ Codex → 127.0.0.1:43871（本程序）→ Windows 系统代理（例如 127.0.
 - Codex 模型请求、HTTP 流式响应和 WebSocket。
 - 远程控制的注册、令牌刷新、配对、设备接口与 WebSocket。
 - Gmail、GitHub 等通过 Codex 内置 `codex_apps` MCP 使用的应用连接器，需使用 ChatGPT 登录并将凭据保存在对应 Codex 配置目录的 `auth.json` 中。
+- 桌面端按“工作区后端”直接发出的账户、用量和云任务请求（不带本机路由值，日志中 `desktop=True`）。
 - 使用同一份用户配置的 Codex 桌面应用和 Codex CLI。
 - 用户登录后自启动；进程异常退出后，计划任务每分钟尝试重新启动，最多 999 次。
-- 不更改全局代理环境变量，不注入其他进程，不安装证书或网络驱动。
+- 不更改全局代理环境变量，不注入其他进程，不安装网络驱动；只在当前用户的证书存储中安装一张仅对 `127.0.0.1` 有效的本机证书，卸载时删除。
 
 仅转发到 `chatgpt.com/backend-api` 下的接口。模型连接使用 `openai_base_url`，远程控制、内置应用 MCP 和相关账户接口使用 `chatgpt_base_url`；仅设置前者无法代理远程控制。浏览器、更新下载、SSH、独立 MCP 服务器等其他连接不在此范围。该项目不是通用代理工具，也不是 OpenAI 官方组件。
+
+新版 Codex 把 `chatgpt_base_url` 的来源当作桌面端的“工作区后端”，桌面端随后会直接向 `https://127.0.0.1:43871/backend-api/...` 发出不带路由值的请求。本程序原样转发这些请求，但从不为它们补齐登录信息，所以本机路由值仍然只保护 MCP 登录补齐功能。已知限制：其中 `/backend-api/accounts/check`、`/backend-api/automations`、支付与推荐等原本供 ChatGPT 网页使用的接口受 Cloudflare 浏览器校验保护，只接受真实浏览器的 TLS 指纹，经任何非浏览器隧道（包括本程序）都会得到 `403` 挑战页，桌面日志记录为 `sa_server_request_failed`。登录、模型对话、远程控制、内置连接器、云任务（`/wham/...`）和用量查询不受影响；受影响的只是自动化列表、账单和推荐等界面信息。
 
 `chatgpt_base_url` 是共享后端地址，也会影响内置图片生成等功能；当前核查的 Codex 版本没有独立的远程控制后端地址配置。因此本程序保留这些请求的正常转发，不通过路径白名单将它们拒绝。等待官方服务器响应头的上限为 10 分钟，以兼容图片生成等较慢请求；本机请求头、CONNECT 响应头和 TLS 握手仍使用 20 秒限制，TCP 连接仍为 15 秒。响应正文及 WebSocket 帧继续流式转发。
 
@@ -48,16 +62,16 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\check.ps1
 
 | 文件 | 用途 |
 | --- | --- |
-| `build\CodexProxyGuardian-Setup.exe` | 单文件安装包，复制到新电脑后双击即可安装。 |
-| `build\CodexProxyGuardian.exe` | 后台程序本体，需由安装工具生成配套配置，不应直接作为安装包分发。 |
+| `build\CodexProxyGuardian-Setup.exe` | 单文件安装包，复制到新电脑后双击即可安装或卸载。 |
+| `build\CodexProxyGuardian.exe` | 后台程序本体，需由安装工具生成配套配置和证书，不应直接作为安装包分发。 |
 
-`CodexProxyGuardian.csproj` 用于在 Visual Studio 中编辑和构建后台程序；完整安装包通过 `build.ps1` 构建，安装界面源码为 `src/Setup.cs`。
+`CodexProxyGuardian.csproj` 用于在 Visual Studio 中编辑和构建后台程序；完整安装包通过 `build.ps1` 构建，安装界面源码为 `src/Setup.cs`。安装包也支持静默命令行，供脚本和检查使用：`CodexProxyGuardian-Setup.exe --install`、`--uninstall`，可加 `--skip-certificate` 跳过证书信任或删除步骤，`--` 之后的参数原样传给对应脚本（例如 `-InstallDirectory`、`-Port`）。
 
-自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移、远程控制路径、MCP 凭据范围与轮换、本机入口的请求限制，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口和临时目录中的合成登录文件，不读取真实登录凭据、不修改系统代理、不调用真实模型、不停止当前安装的守护程序。GitHub Actions 在 Windows 上执行相同检查。
+自动检查覆盖两个服务器地址的配置增删、重复安装、保留其他配置、旧配置迁移（含 `http://` 入口升级为 `https://`）、远程控制与桌面端路径、MCP 凭据范围与轮换、本机入口的请求限制、HTTPS 入口的证书生成与 TLS 握手，以及安装包内嵌文件与原始构建结果的 SHA-256 一致性。测试使用随机端口和临时目录中的合成登录文件，不读取真实登录凭据、不修改系统代理、不调用真实模型、不停止当前安装的守护程序；TLS 检查会在当前用户的“个人”证书存储中创建一张临时证书，不加入任何根存储，检查结束时删除。GitHub Actions 在 Windows 上执行相同检查。
 
 响应等待回归测试使用内存中的延迟数据流，验证超过 20 秒才返回的响应、总等待期限、分块头、HTTP 正文和 WebSocket 首帧的字节保留，以及 64 KiB 头大小限制。
 
-可选的完整安装检查：`powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\install-smoke.ps1`。它会创建独立的测试目录、随机端口和临时计划任务，测试首次安装、重复安装与卸载，然后清理测试任务；不会重装正在使用的守护程序。测试文件保留在被 Git 忽略的 `build` 目录中。
+可选的完整安装检查：`powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\tests\install-smoke.ps1`。它会创建独立的测试目录、随机端口、临时计划任务和临时证书，测试首次安装、重复安装、旧版 `http://` 配置经安装包升级，以及经安装包卸载，然后清理测试任务和证书；证书不会加入根存储，也不会重装正在使用的守护程序。测试文件保留在被 Git 忽略的 `build` 目录中。
 
 ## 自动发布安装包
 
@@ -75,7 +89,7 @@ PR 和其他分支只构建、检查；发布任务仅对 `main` 开放写权限
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 ```
 
-安装工具会构建 EXE，保存到 `%LOCALAPPDATA%\OpenAI\CodexProxyGuardian`，创建 `CodexProxyGuardian` 登录计划任务，并在 Codex 用户配置中设置 `openai_base_url` 和 `chatgpt_base_url`。默认配置文件为 `%USERPROFILE%\.codex\config.toml`；若设置了 `CODEX_HOME`，则使用对应目录。安装时将配置目录保存为本机 `settings.json` 的 `CodexConfigDirectory`，确保计划任务使用同一份登录文件；不会把登录凭据写进该设置文件。
+安装工具会构建 EXE，保存到 `%LOCALAPPDATA%\OpenAI\CodexProxyGuardian`，生成并信任本机证书（Windows 会弹出确认），创建 `CodexProxyGuardian` 登录计划任务，并在 Codex 用户配置中设置 `openai_base_url` 和 `chatgpt_base_url`。默认配置文件为 `%USERPROFILE%\.codex\config.toml`；若设置了 `CODEX_HOME`，则使用对应目录。安装时将配置目录保存为本机 `settings.json` 的 `CodexConfigDirectory`，证书指纹保存为 `CertificateThumbprint`，确保计划任务使用同一份登录文件和证书；不会把登录凭据或私钥写进该设置文件。`-SkipCertificateTrust` 只供安装包和自动检查使用，它们自行处理信任步骤。
 
 安装后完整退出并重新打开 Codex 一次。之后使用原来的桌面、开始菜单或任务栏图标。安装脚本仅在安装或升级时运行，日常后台运行不依赖 PowerShell。
 
@@ -85,7 +99,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 
 ## 运行行为与限制
 
-- 只监听 `127.0.0.1`，不是局域网服务；请求必须包含本机生成的随机路由值。
+- 只监听 `127.0.0.1`，不是局域网服务，只接受 TLS 连接；补齐 MCP 登录的请求必须包含本机生成的随机路由值，桌面端不带路由值的 `/backend-api/...` 请求只做原样转发。
 - 拒绝带 `Origin` 的浏览器请求，不接受任意目标地址，不记录对话内容、请求头或登录凭据。
 - 代理关闭、PAC-only 配置或代理不可用时返回连接失败，不自动退回直连。目前不支持 SOCKS、HTTPS-to-proxy 或需要认证的代理。
 - 代理变化只对新连接生效；已有 WebSocket 断开重连后使用新代理。
@@ -93,7 +107,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 - 自启动发生在当前用户登录 Windows 后，不是在登录前运行的系统服务。
 - 程序不位于 Codex 更新目录中。正常更新不会覆盖它，但未来 Codex 若修改接口或配置语义，需要重新验证。
 
-状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数。这些数值在进程重启后归零，是累计记录，不表示当前在线设备数；`failures` 统计转发和本机 MCP 认证异常，不包含所有上游 HTTP 错误。模型握手成功不代表远程控制已连接。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
+状态和简短日志位于安装目录的 `status.json` 与 `guardian.log`。`remoteControlRequests` 记录远程控制请求次数，`remoteControlUpgrades` 记录成功的远程控制 WebSocket 握手次数，`desktopRequests` 记录桌面端不带路由值的请求次数，`tls` 表示入口是否以 HTTPS 运行。这些数值在进程重启后归零，是累计记录，不表示当前在线设备数；`failures` 统计转发和本机 MCP 认证异常，不包含所有上游 HTTP 错误。模型握手成功不代表远程控制已连接。日志中 `request-error ... stage=local-tls` 表示某个本机连接没有完成 TLS 握手，例如仍按旧版 `http://` 地址连接的 Codex 进程，重启 Codex 后消失。任务管理器中进程名为 `CodexProxyGuardian.exe`，任务计划程序中任务名为 `CodexProxyGuardian`。
 
 `appsMcpRequests` 记录通过入口与方法检查的内置 MCP 请求，`appsMcpAuthenticatedRequests` 记录自动补齐登录的次数；后者不等于工具调用成功次数。MCP 响应日志标记 `appsMcp=True`，便于区分模型与连接器请求。`mcp-auth-error` 表示登录文件不可用或账户不匹配，也计入 `failures`，不会记录凭据、账户 ID 或文件内容。
 
@@ -101,7 +115,9 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\install.ps1
 
 ## 停用
 
-先完整退出 Codex，然后执行：
+最简单的方式是再次双击 `CodexProxyGuardian-Setup.exe`，点击“卸载”，Windows 询问是否删除证书时选择“是”，然后完整退出并重新打开 Codex。
+
+也可以先完整退出 Codex，然后在源码目录执行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\uninstall.ps1
@@ -115,7 +131,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "$env:LOCALAPPDATA
 
 如果安装时使用了自定义 `CODEX_HOME`，卸载时应使用相同设置。开发测试中的自定义安装目录和任务名，也应通过对应参数传给卸载工具。
 
-卸载工具只移除该程序拥有的 `openai_base_url` 和 `chatgpt_base_url`，保留其他 Codex 配置，结束后台进程并删除登录计划任务。安装文件和备份保留，便于检查或恢复。重新打开 Codex 后回到原来的连接方式。
+卸载工具只移除该程序拥有的 `openai_base_url` 和 `chatgpt_base_url`（包括旧版的 `http://` 条目），保留其他 Codex 配置，结束后台进程，删除登录计划任务，并从当前用户的证书存储中删除本机证书的私钥和信任。脚本默认保留程序文件、日志和备份，加 `-RemoveFiles` 才删除程序文件和日志（安装包的“卸载”按钮使用这种方式），配置备份始终保留在安装目录的 `backups` 中；`-SkipCertificateRemoval` 只供安装包和自动检查使用。重新打开 Codex 后回到原来的连接方式。
 
 ## 已完成的连接验证
 
@@ -129,10 +145,12 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "$env:LOCALAPPDATA
 
 同日修复了图片生成被 20 秒响应头等待切断的问题。隔离测试复现旧超时并验证延迟响应可完成；只替换本机 EXE 后，实际完成一次文字生成图片、一次带参考图的编辑、一次无工具的模型对话，以及 Gmail/GitHub 连接器只读调用。远控重新完成注册和 `101` 握手，测试结束时守护程序转发失败计数为零；未代替用户从手机操作远控。升级前后检查确认 Codex 配置、守护程序设置、Windows 系统代理和计划任务定义均未改变。
 
+2026-09-19，Codex 桌面版自动升级到 26.915（内核 0.155.0-alpha.9.2）后，同一台电脑连续四次启动都因 `account/read` 拒绝本机 `http://` 入口而停在登录页；用独立 app-server 复现后确认只把 `chatgpt_base_url` 换成 HTTPS 即可通过，改为 HTTPS 入口并信任本机证书后重启 Codex，`account/read` 成功、远程控制重新完成 `101` 握手、内置 MCP 补齐登录 13 次全部成功、桌面端不带路由值的请求正常转发；同时记录到上述 Cloudflare 浏览器校验限制。这次核查还确认新版内核的普通 HTTP 请求会自行使用 Windows 系统代理，而远程控制 WebSocket 不会。
+
 Codex 提供的服务器地址配置见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 ## 项目内容与同步
 
-源码、构建/安装工具、自动检查和文档保存在 Git 中。真实 `settings.json`、随机路由值、Codex 登录信息、个人配置、运行日志和编译产物不提交。
+源码、构建/安装工具、自动检查和文档保存在 Git 中。真实 `settings.json`、随机路由值、证书指纹、Codex 登录信息、个人配置、运行日志和编译产物不提交。
 
 多端开发前先 `git fetch` 并安全同步；完成修改后执行构建和检查，再提交、推送。运行和测试依赖 Windows，Mac 或手机可通过 GitHub 阅读、编辑源码，但不能直接运行这个 Windows 程序。
